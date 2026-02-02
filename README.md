@@ -207,7 +207,8 @@ Flags:
 | `--max-inline-bytes` | Max inline context bytes (0 uses interpreter default) |
 | `--max-total-bytes` | Max total context bytes (0 uses interpreter default) |
 | `--inline-text-max-bytes` | Max inline text bytes per file (0 uses default 1MB) |
-| `--system` | Override system prompt |
+| `--system` | Custom instructions prepended to the default RLM system prompt |
+| `--system-override` | Replace the entire system prompt instead of prepending |
 
 The CLI builds a JSON context from attached files and exposes it as `context` in Python. Small text files are also loaded into `context["files"][i]["text"]` for easier scanning.
 

@@ -46,7 +46,8 @@ func newRLMCmd() *cobra.Command {
 	cmd.Flags().Int64Var(&flags.maxInlineBytes, "max-inline-bytes", 0, "Max inline context bytes (0 uses interpreter default)")
 	cmd.Flags().Int64Var(&flags.maxTotalBytes, "max-total-bytes", 0, "Max total context bytes (0 uses interpreter default)")
 	cmd.Flags().Int64Var(&flags.inlineTextMaxBytes, "inline-text-max-bytes", 0, "Max inline text bytes per file (0 uses default)")
-	cmd.Flags().StringVar(&flags.system, "system", "", "Override system prompt")
+	cmd.Flags().StringVar(&flags.system, "system", "", "Custom instructions prepended to the default RLM system prompt")
+	cmd.Flags().BoolVar(&flags.systemOverride, "system-override", false, "Replace the entire system prompt instead of prepending")
 	cmd.Flags().StringVar(&flags.toolChoice, "tool-choice", "", "Tool choice mode: auto, required, none")
 
 	return cmd
@@ -55,6 +56,7 @@ func newRLMCmd() *cobra.Command {
 type rlmFlags struct {
 	model              string
 	system             string
+	systemOverride     bool
 	attachments        []string
 	attachmentType     string
 	attachStdin        bool
@@ -172,6 +174,7 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 		query:          query,
 		model:          model,
 		system:         flags.system,
+		systemOverride: flags.systemOverride,
 		toolChoice:     toolChoice,
 		maxIterations:  flags.maxIterations,
 		maxSubcalls:    flags.maxSubcalls,
@@ -205,6 +208,7 @@ type localRLMParams struct {
 	query          string
 	model          string
 	system         string
+	systemOverride bool
 	toolChoice     *llm.ToolChoice
 	maxIterations  int
 	maxSubcalls    int
@@ -285,11 +289,16 @@ func runLocalRLMLoop(ctx context.Context, params localRLMParams) (workflow.RLMRe
 		})
 	}
 
-	systemPrompt := params.system
-	if strings.TrimSpace(systemPrompt) == "" {
+	var systemPrompt string
+	if params.systemOverride && strings.TrimSpace(params.system) != "" {
+		// Full override: use provided system prompt as-is
+		systemPrompt = params.system
+	} else {
+		// Default: prepend custom instructions to the default RLM system prompt
 		systemPrompt = rlm.BuildSystemPrompt(rlm.SystemPromptOptions{
-			MaxDepth:    params.maxDepth,
-			MaxSubcalls: params.maxSubcalls,
+			MaxDepth:     params.maxDepth,
+			MaxSubcalls:  params.maxSubcalls,
+			CustomPrefix: params.system,
 		})
 	}
 	conversation := []llm.InputItem{
