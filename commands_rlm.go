@@ -1,24 +1,27 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/modelrelay/modelrelay/platform/rlm"
+	"github.com/modelrelay/modelrelay/platform/rlmrunner"
 	"github.com/modelrelay/modelrelay/platform/workflow"
 	sdk "github.com/modelrelay/modelrelay/sdk/go"
 	"github.com/modelrelay/modelrelay/sdk/go/llm"
-	sdkrlm "github.com/modelrelay/modelrelay/sdk/go/rlm"
 	"github.com/spf13/cobra"
 )
 
@@ -27,7 +30,7 @@ func newRLMCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "rlm <query>",
-		Short: "Run a local RLM session (Python runs locally, LLM calls via ModelRelay)",
+		Short: "Run an RLM session (local Python by default; use --remote for hosted)",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRLM(cmd, args, &flags)
@@ -48,7 +51,8 @@ func newRLMCmd() *cobra.Command {
 	cmd.Flags().Int64Var(&flags.inlineTextMaxBytes, "inline-text-max-bytes", 0, "Max inline text bytes per file (0 uses default)")
 	cmd.Flags().StringVar(&flags.system, "system", "", "Custom instructions prepended to the default RLM system prompt")
 	cmd.Flags().BoolVar(&flags.systemOverride, "system-override", false, "Replace the entire system prompt instead of prepending")
-	cmd.Flags().StringVar(&flags.toolChoice, "tool-choice", "", "Tool choice mode: auto, required, none")
+	cmd.Flags().StringVar(&flags.toolChoice, "tool-choice", "", "Tool choice mode (unsupported for rlm-core)")
+	cmd.Flags().BoolVar(&flags.remote, "remote", false, "Run RLM on ModelRelay (/rlm/execute) instead of local Python")
 
 	return cmd
 }
@@ -69,7 +73,13 @@ type rlmFlags struct {
 	maxTotalBytes      int64
 	inlineTextMaxBytes int64
 	toolChoice         string
+	remote             bool
 }
+
+const (
+	defaultRLMInlineBytes    = int64(128 * 1024)
+	defaultRLMMaxOutputChars = 1_048_576
+)
 
 type rlmUsage struct {
 	mu    sync.Mutex
@@ -125,69 +135,189 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 		defer cleanup()
 	}
 
+	if flags.remote {
+		if err := validateRLMRemoteAttachments(files); err != nil {
+			return err
+		}
+		files = stripRemoteAttachmentPaths(files)
+	}
+
 	contextPayload, err := mergeRLMContextFiles([]byte("null"), files)
 	if err != nil {
 		return err
 	}
 
-	client, err := newPromptClient(cfg)
-	if err != nil {
-		return err
+	var (
+		client *sdk.Client
+		apiKey sdk.APIKeyAuth
+	)
+	if flags.remote {
+		if strings.TrimSpace(cfg.APIKey) == "" {
+			return errors.New("api key required")
+		}
+		apiKey, err = sdk.ParseAPIKeyAuth(cfg.APIKey)
+		if err != nil {
+			return err
+		}
+	} else {
+		client, err = newPromptClient(cfg)
+		if err != nil {
+			return err
+		}
 	}
 
 	ctx, cancel := contextWithTimeout(cfg.Timeout)
 	defer cancel()
 
-	interp := sdkrlm.NewLocalInterpreter(sdkrlm.LocalInterpreterConfig{
-		PythonPath: flags.pythonPath,
-		Caps: sdkrlm.InterpreterCapabilities{
-			MaxInlineBytes: flags.maxInlineBytes,
-			MaxTotalBytes:  flags.maxTotalBytes,
-		},
-	})
+	if strings.TrimSpace(flags.toolChoice) != "" {
+		return errors.New("tool-choice is not supported for rlm-core")
+	}
 
-	plan, err := interp.PlanContext(contextPayload, "context.json")
+	maxInlineBytes := flags.maxInlineBytes
+	if maxInlineBytes <= 0 {
+		maxInlineBytes = defaultRLMInlineBytes
+	}
+	policy := rlm.ContextPolicy{
+		MaxInlineBytes: maxInlineBytes,
+		MaxTotalBytes:  flags.maxTotalBytes,
+		PreferInline:   true,
+	}
+
+	contextDir, err := os.MkdirTemp("", "modelrelay-rlm-context-")
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err := os.RemoveAll(contextDir); err != nil {
+			log.Printf("warning: failed to remove temp dir %s: %v", contextDir, err)
+		}
+	}()
+	contextPath := filepath.Join(contextDir, "context.json")
+	plan, err := rlm.PlanContext(contextPayload, policy, contextPath)
+	if err != nil {
+		return err
+	}
+	if plan.Mode == rlm.ContextLoadFile && !flags.remote {
+		if err := os.WriteFile(plan.ContextPath, contextPayload, 0o644); err != nil {
+			return err
+		}
+	}
+
+	if flags.remote {
+		return runRLMRemote(ctx, cfg, apiKey, model, strings.Join(args, " "), contextPayload, plan, flags, len(files) > 0)
+	}
 
 	usage := &rlmUsage{}
-	endpoint, token, subcalls, closeServer, err := startLocalRLMSubcallServer(ctx, client, model, flags.maxDepth, flags.maxSubcalls, usage)
+	subcallEndpoint, rootEndpoint, token, closeServer, err := startLocalRLMServer(ctx, client, model, flags.maxDepth, flags.maxSubcalls, usage)
 	if err != nil {
 		return err
 	}
 	defer closeServer()
 
-	wrapper := rlm.BuildRLMWrapperWithPlan(sdkContextPlanToPlatform(plan))
 	query := strings.Join(args, " ")
+	sessionID, err := randomToken()
+	if err != nil {
+		return err
+	}
+	systemPrompt := ""
+	systemAdditions := ""
+	if flags.systemOverride && strings.TrimSpace(flags.system) != "" {
+		systemPrompt = strings.TrimSpace(flags.system)
+	} else {
+		systemAdditions = rlm.BuildRunnerSystemAdditions(flags.system, flags.maxDepth, flags.maxSubcalls)
+	}
 
-	toolChoice, err := parseToolChoice(flags.toolChoice)
+	contextInline := json.RawMessage(nil)
+	contextFile := ""
+	switch plan.Mode {
+	case rlm.ContextLoadInline:
+		contextInline = plan.InlineJSON
+	case rlm.ContextLoadFile:
+		contextFile = plan.ContextPath
+	}
+
+	runnerReq := rlmrunner.RunnerRequest{
+		Model:                 model,
+		Question:              query,
+		SystemPrompt:          systemPrompt,
+		SystemPromptAdditions: systemAdditions,
+		Context:               contextInline,
+		ContextPath:           contextFile,
+		MaxIterations:         flags.maxIterations,
+		MaxDepth:              flags.maxDepth,
+		MaxSubcalls:           flags.maxSubcalls,
+		ExecTimeoutMS:         flags.execTimeoutMS,
+		MaxOutputChars:        defaultRLMMaxOutputChars,
+		Token:                 token,
+		RootEndpoint:          rootEndpoint,
+		SubcallEndpoint:       subcallEndpoint,
+		Session:               sessionID,
+		SessionIndex:          1,
+	}
+
+	interpreter := rlm.NewLocalInterpreter(rlm.LocalInterpreterConfig{
+		PythonPath: flags.pythonPath,
+		Limits: rlm.InterpreterLimits{
+			MaxTimeoutMS:   rlmrunner.DefaultRunnerTimeoutMS,
+			MaxOutputBytes: defaultRLMMaxOutputChars,
+		},
+		Caps: rlm.InterpreterCapabilities{
+			MaxInlineBytes: maxInlineBytes,
+			MaxTotalBytes:  flags.maxTotalBytes,
+		},
+	})
+	session, err := interpreter.Start(ctx, "rlm-local", nil)
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+
+	runtimeDir, err := rlmrunner.RuntimeDir()
 	if err != nil {
 		return err
 	}
 
-	result, err := runLocalRLMLoop(ctx, localRLMParams{
-		client:         client,
-		interpreter:    interp,
-		endpoint:       endpoint,
-		token:          token,
-		query:          query,
-		model:          model,
-		system:         flags.system,
-		systemOverride: flags.systemOverride,
-		toolChoice:     toolChoice,
-		maxIterations:  flags.maxIterations,
-		maxSubcalls:    flags.maxSubcalls,
-		maxDepth:       flags.maxDepth,
-		execTimeoutMS:  flags.execTimeoutMS,
-		contextPayload: contextPayload,
-		contextPlan:    plan,
-		wrapper:        wrapper,
-		subcallCounter: subcalls,
-		usage:          usage,
-	})
+	runOpts := rlmrunner.RunOptions{
+		RequestID: sessionID,
+		TimeoutMS: interpreter.Limits().MaxTimeoutMS,
+	}
+	runOpts.OnProgress = func(evt rlmrunner.ProgressEvent) {
+		fmt.Fprintf(os.Stderr, "rlm: %s\n", evt.Status)
+	}
+	runnerResult, err := rlmrunner.RunWithSession(ctx, session, runtimeDir, runnerReq, runOpts)
+	if err != nil {
+		if runnerResult.Response.Error != nil && runnerResult.Response.Error.Message != "" {
+			return errors.New(runnerResult.Response.Error.Message)
+		}
+		return err
+	}
+	runnerResp := runnerResult.Response
+	if !runnerResp.Ready {
+		return errors.New("max iterations exceeded")
+	}
+
+	answerPayload, err := json.Marshal(runnerResp.Answer)
 	if err != nil {
 		return err
+	}
+	trajectory := make([]workflow.RLMIterationV1, 0, len(runnerResp.Trajectory))
+	for _, entry := range runnerResp.Trajectory {
+		trajectory = append(trajectory, workflow.RLMIterationV1{
+			Iteration: entry.Iteration,
+			Code:      entry.CodeExecuted,
+			Stdout:    entry.ExecutionResult,
+		})
+	}
+	totalUsage := workflow.TokenUsage{}
+	if usage != nil {
+		totalUsage = usage.snapshot()
+	}
+	result := workflow.RLMResultV1{
+		Answer:     answerPayload,
+		Iterations: runnerResp.Iterations,
+		Subcalls:   runnerResp.Subcalls,
+		TotalUsage: totalUsage,
+		Trajectory: trajectory,
 	}
 
 	if cfg.Output == outputFormatJSON {
@@ -196,196 +326,12 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 		return enc.Encode(result)
 	}
 
-	fmt.Println(string(result.Answer))
+	fmt.Println(runnerResp.Answer)
 	return nil
 }
 
-type localRLMParams struct {
-	client         *sdk.Client
-	interpreter    *sdkrlm.LocalInterpreter
-	endpoint       string
-	token          string
-	query          string
-	model          string
-	system         string
-	systemOverride bool
-	toolChoice     *llm.ToolChoice
-	maxIterations  int
-	maxSubcalls    int
-	maxDepth       int
-	execTimeoutMS  int
-	contextPayload []byte
-	contextPlan    sdkrlm.ContextPlan
-	wrapper        string
-	subcallCounter *int
-	usage          *rlmUsage
-}
-
-// sdkContextPlanToPlatform converts SDK ContextPlan to platform ContextPlan.
-func sdkContextPlanToPlatform(p sdkrlm.ContextPlan) rlm.ContextPlan {
-	return rlm.ContextPlan{
-		Mode:        rlm.ContextLoadMode(p.Mode),
-		ContextPath: p.ContextPath,
-		InlineJSON:  p.InlineJSON,
-	}
-}
-
-// sdkExecResultToPlatform converts SDK ExecutionResult to platform ExecutionResult.
-func sdkExecResultToPlatform(r *sdkrlm.ExecutionResult) *rlm.ExecutionResult {
-	if r == nil {
-		return nil
-	}
-	return &rlm.ExecutionResult{
-		Stdout:     r.Stdout,
-		Stderr:     r.Stderr,
-		ExitCode:   r.ExitCode,
-		DurationMS: r.DurationMS,
-		TimedOut:   r.TimedOut,
-	}
-}
-
-func runLocalRLMLoop(ctx context.Context, params localRLMParams) (workflow.RLMResultV1, error) {
-	if strings.TrimSpace(params.query) == "" {
-		return workflow.RLMResultV1{}, errors.New("query is required")
-	}
-
-	var (
-		trajectory []workflow.RLMIterationV1
-		answer     json.RawMessage
-	)
-
-	var (
-		session      sdkrlm.CodeSession
-		sessionID    string
-		sessionIndex int64
-	)
-	startSession := func() error {
-		nextIndex := sessionIndex + 1
-		nextSession, nextID, err := startLocalRLMSession(ctx, params.interpreter, params.contextPlan, params.contextPayload)
-		if err != nil {
-			return err
-		}
-		if session != nil {
-			session.Close()
-		}
-		session = nextSession
-		sessionID = nextID
-		sessionIndex = nextIndex
-		return nil
-	}
-	if err := startSession(); err != nil {
-		return workflow.RLMResultV1{}, err
-	}
-	defer func() {
-		if session != nil {
-			session.Close()
-		}
-	}()
-
-	buildEnv := func() []string {
-		return rlm.BuildEnv(params.token, params.endpoint, rlm.SessionState{
-			ID:    sessionID,
-			Index: sessionIndex,
-		})
-	}
-
-	var systemPrompt string
-	if params.systemOverride && strings.TrimSpace(params.system) != "" {
-		// Full override: use provided system prompt as-is
-		systemPrompt = params.system
-	} else {
-		// Default: prepend custom instructions to the default RLM system prompt
-		systemPrompt = rlm.BuildSystemPrompt(rlm.SystemPromptOptions{
-			MaxDepth:     params.maxDepth,
-			MaxSubcalls:  params.maxSubcalls,
-			CustomPrefix: params.system,
-		})
-	}
-	conversation := []llm.InputItem{
-		llm.NewSystemText(systemPrompt),
-		llm.NewUserText(params.query),
-	}
-
-	for i := 0; i < params.maxIterations; i++ {
-		resp, err := callLLM(ctx, params.client, params.model, conversation, params.toolChoice)
-		if err != nil {
-			return workflow.RLMResultV1{}, err
-		}
-		if params.usage != nil {
-			params.usage.add(resp.Usage)
-		}
-
-		code := rlm.NormalizeRLMCode(resp.AssistantText())
-		if code == "" {
-			return workflow.RLMResultV1{}, errors.New("missing response text")
-		}
-
-		execResult, execErr := session.RunPython(ctx, params.wrapper+code, buildEnv(), params.execTimeoutMS)
-		platformExecResult := sdkExecResultToPlatform(execResult)
-
-		// Use shared iteration processing
-		iterOutput := rlm.ProcessIteration(rlm.IterationInput{
-			Iteration:  i + 1,
-			Code:       code,
-			ExecResult: platformExecResult,
-			ExecErr:    execErr,
-		})
-		if iterOutput.ParseErr != nil {
-			return workflow.RLMResultV1{}, iterOutput.ParseErr
-		}
-
-		recovered := false
-		if iterOutput.NeedsRestart {
-			if startErr := startSession(); startErr != nil {
-				return workflow.RLMResultV1{}, startErr
-			}
-			recovered = true
-		}
-
-		// Build iteration record
-		record := rlm.BuildIterationRecord(i+1, code, platformExecResult)
-		trajectory = append(trajectory, workflow.RLMIterationV1{
-			Iteration: record.Iteration,
-			Code:      record.Code,
-			Stdout:    record.Stdout,
-			Stderr:    record.Stderr,
-			ExitCode:  record.ExitCode,
-			TimedOut:  record.TimedOut,
-		})
-
-		if iterOutput.Done {
-			answer = iterOutput.Answer
-			break
-		}
-
-		conversation = append(conversation, llm.NewAssistantText(code))
-		feedback := rlm.BuildFeedbackMessage(platformExecResult, execErr, recovered)
-		conversation = append(conversation, llm.NewUserText(feedback))
-	}
-
-	if len(answer) == 0 {
-		return workflow.RLMResultV1{}, errors.New("max iterations exceeded")
-	}
-
-	usage := workflow.TokenUsage{}
-	if params.usage != nil {
-		usage = params.usage.snapshot()
-	}
-
-	return workflow.RLMResultV1{
-		Answer:     answer,
-		Iterations: len(trajectory),
-		Subcalls:   *params.subcallCounter,
-		TotalUsage: usage,
-		Trajectory: trajectory,
-	}, nil
-}
-
-func callLLM(ctx context.Context, client *sdk.Client, model string, input []llm.InputItem, toolChoice *llm.ToolChoice) (*sdk.Response, error) {
+func callLLM(ctx context.Context, client *sdk.Client, model string, input []llm.InputItem) (*sdk.Response, error) {
 	builder := client.Responses.New().Model(sdk.NewModelID(model)).Input(input)
-	if toolChoice != nil {
-		builder = builder.ToolChoice(*toolChoice)
-	}
 	req, opts, err := builder.Build()
 	if err != nil {
 		return nil, err
@@ -397,36 +343,17 @@ func callLLM(ctx context.Context, client *sdk.Client, model string, input []llm.
 	return resp, nil
 }
 
-func startLocalRLMSession(ctx context.Context, interp *sdkrlm.LocalInterpreter, plan sdkrlm.ContextPlan, payload []byte) (sdkrlm.CodeSession, string, error) {
-	session, err := interp.Start(ctx, "rlm-local", nil)
-	if err != nil {
-		return nil, "", err
-	}
-	if plan.Mode == sdkrlm.ContextLoadFile {
-		if err := session.WriteFile(ctx, plan.ContextPath, payload, 0o644); err != nil {
-			session.Close()
-			return nil, "", err
-		}
-	}
-	token, err := randomToken()
-	if err != nil {
-		session.Close()
-		return nil, "", err
-	}
-	return session, token, nil
-}
-
-func startLocalRLMSubcallServer(ctx context.Context, client *sdk.Client, defaultModel string, maxDepth, maxSubcalls int, usage *rlmUsage) (endpoint string, token string, subcalls *int, closeFn func(), err error) {
+func startLocalRLMServer(ctx context.Context, client *sdk.Client, defaultModel string, maxDepth, maxSubcalls int, usage *rlmUsage) (subcallEndpoint string, rootEndpoint string, token string, closeFn func(), err error) {
 	if maxSubcalls < 0 {
-		return "", "", nil, nil, errors.New("max_subcalls must be >= 0")
+		return "", "", "", nil, errors.New("max_subcalls must be >= 0")
 	}
 	token, err = randomToken()
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", "", "", nil, err
 	}
 	counter := 0
 
-	handler := &localSubcallHandler{
+	subcallHandler := &localSubcallHandler{
 		ctx:          ctx,
 		client:       client,
 		defaultModel: defaultModel,
@@ -436,11 +363,19 @@ func startLocalRLMSubcallServer(ctx context.Context, client *sdk.Client, default
 		counter:      &counter,
 		usage:        usage,
 	}
+	rootHandler := &localRootHandler{
+		ctx:          ctx,
+		client:       client,
+		defaultModel: defaultModel,
+		token:        token,
+		usage:        usage,
+	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/rlm/subcall", handler)
+	mux.Handle("/rlm/subcall", subcallHandler)
+	mux.Handle("/rlm/root", rootHandler)
 	server := httptest.NewServer(mux)
-	return server.URL + "/rlm/subcall", token, &counter, server.Close, nil
+	return server.URL + "/rlm/subcall", server.URL + "/rlm/root", token, server.Close, nil
 }
 
 type localSubcallHandler struct {
@@ -510,7 +445,7 @@ func (h *localSubcallHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	resp, err := callLLM(h.ctx, h.client, model, []llm.InputItem{llm.NewUserText(req.Prompt)}, nil)
+	resp, err := callLLM(h.ctx, h.client, model, []llm.InputItem{llm.NewUserText(req.Prompt)})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -526,6 +461,151 @@ func (h *localSubcallHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"result": text})
+}
+
+type localRootMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type localRootRequest struct {
+	Messages        []localRootMessage `json:"messages"`
+	Model           *string            `json:"model,omitempty"`
+	Provider        string             `json:"provider,omitempty"`
+	MaxOutputTokens int64              `json:"max_output_tokens,omitempty"`
+	Temperature     *float64           `json:"temperature,omitempty"`
+	Stop            []string           `json:"stop,omitempty"`
+	Session         string             `json:"session,omitempty"`
+	SessionIndex    int64              `json:"session_index,omitempty"`
+}
+
+type localRootUsage struct {
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+	TotalTokens  int64 `json:"total_tokens"`
+}
+
+type localRootResponse struct {
+	Result     string         `json:"result"`
+	Usage      localRootUsage `json:"usage"`
+	Provider   string         `json:"provider,omitempty"`
+	ResponseID string         `json:"response_id,omitempty"`
+	StopReason string         `json:"stop_reason,omitempty"`
+	Model      string         `json:"model,omitempty"`
+}
+
+type localRootHandler struct {
+	ctx          context.Context
+	client       *sdk.Client
+	defaultModel string
+	token        string
+	usage        *rlmUsage
+}
+
+func (h *localRootHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if strings.TrimSpace(auth[len("bearer "):]) != h.token {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req localRootRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+	if len(req.Messages) == 0 {
+		http.Error(w, "messages required", http.StatusBadRequest)
+		return
+	}
+
+	model := h.defaultModel
+	if req.Model != nil && strings.TrimSpace(*req.Model) != "" {
+		model = strings.TrimSpace(*req.Model)
+	}
+	if model == "" {
+		http.Error(w, "model required", http.StatusBadRequest)
+		return
+	}
+
+	input, err := buildLocalRLMRootInput(req.Messages)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	builder := h.client.Responses.New().Model(sdk.NewModelID(model)).Input(input)
+	if provider := strings.TrimSpace(req.Provider); provider != "" {
+		builder = builder.Provider(sdk.NewProviderID(provider))
+	}
+	if req.MaxOutputTokens > 0 {
+		builder = builder.MaxOutputTokens(req.MaxOutputTokens)
+	}
+	if req.Temperature != nil {
+		builder = builder.Temperature(*req.Temperature)
+	}
+	if len(req.Stop) > 0 {
+		builder = builder.Stop(req.Stop...)
+	}
+
+	request, opts, err := builder.Build()
+	if err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	resp, err := h.client.Responses.Create(h.ctx, request, opts...)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	if h.usage != nil {
+		h.usage.add(resp.Usage)
+	}
+
+	text := strings.TrimSpace(resp.AssistantText())
+	if text == "" {
+		http.Error(w, "missing response", http.StatusBadGateway)
+		return
+	}
+
+	payload := localRootResponse{
+		Result:     text,
+		Usage:      localRootUsage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens, TotalTokens: resp.Usage.TotalTokens},
+		Provider:   resp.Provider,
+		ResponseID: resp.ID,
+		StopReason: string(resp.StopReason),
+		Model:      resp.Model.String(),
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func buildLocalRLMRootInput(messages []localRootMessage) ([]llm.InputItem, error) {
+	if len(messages) == 0 {
+		return nil, errors.New("messages required")
+	}
+	items := make([]llm.InputItem, 0, len(messages))
+	for _, msg := range messages {
+		role := strings.ToLower(strings.TrimSpace(msg.Role))
+		switch role {
+		case string(llm.RoleSystem):
+			items = append(items, llm.NewSystemText(msg.Content))
+		case string(llm.RoleUser):
+			items = append(items, llm.NewUserText(msg.Content))
+		case string(llm.RoleAssistant):
+			items = append(items, llm.NewAssistantText(msg.Content))
+		default:
+			return nil, fmt.Errorf("unsupported message role")
+		}
+	}
+	return items, nil
 }
 
 func randomToken() (string, error) {
@@ -546,21 +626,6 @@ func resolveRLMInlineTextLimit(override int64, maxInlineBytes int64) int64 {
 	return 1024 * 1024
 }
 
-func parseToolChoice(s string) (*llm.ToolChoice, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "":
-		return nil, nil
-	case "auto":
-		return &llm.ToolChoice{Type: llm.ToolChoiceAuto}, nil
-	case "required":
-		return &llm.ToolChoice{Type: llm.ToolChoiceRequired}, nil
-	case "none":
-		return &llm.ToolChoice{Type: llm.ToolChoiceNone}, nil
-	default:
-		return nil, fmt.Errorf("invalid tool-choice: %q (must be auto, required, or none)", s)
-	}
-}
-
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -568,4 +633,287 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 		// Headers already written; log the error since we can't change the response
 		log.Printf("writeJSON encode error: %v", err)
 	}
+}
+
+const rlmRemoteAttachmentNote = "Files in context include inline text only; do not attempt to open local file paths."
+
+type rlmExecuteRemoteRequest struct {
+	Model         string          `json:"model"`
+	Query         string          `json:"query"`
+	Context       json.RawMessage `json:"context,omitempty"`
+	ContextRef    string          `json:"context_ref,omitempty"`
+	SystemPrompt  string          `json:"system_prompt,omitempty"`
+	MaxIterations *int            `json:"max_iterations,omitempty"`
+	MaxDepth      *int            `json:"max_depth,omitempty"`
+	MaxSubcalls   *int            `json:"max_subcalls,omitempty"`
+	TimeoutMS     *int            `json:"timeout_ms,omitempty"`
+}
+
+type rlmExecuteRemoteResult struct {
+	Raw      json.RawMessage
+	Answer   json.RawMessage
+	Progress []rlmrunner.ProgressEvent
+}
+
+type rlmContextCreateRequest struct {
+	Context json.RawMessage `json:"context"`
+}
+
+type rlmContextCreateResponse struct {
+	ID string `json:"id"`
+}
+
+func runRLMRemote(ctx context.Context, cfg runtimeConfig, apiKey sdk.APIKeyAuth, model string, query string, contextPayload json.RawMessage, plan rlm.ContextPlan, flags *rlmFlags, hasAttachments bool) error {
+	if flags.systemOverride {
+		return errors.New("system-override is not supported with --remote")
+	}
+
+	systemPrompt := strings.TrimSpace(flags.system)
+	if hasAttachments {
+		systemPrompt = appendSystemPrompt(systemPrompt, rlmRemoteAttachmentNote)
+	}
+
+	contextInline := json.RawMessage(nil)
+	contextRef := ""
+	switch plan.Mode {
+	case rlm.ContextLoadInline:
+		if !isJSONNull(contextPayload) {
+			contextInline = contextPayload
+		}
+	case rlm.ContextLoadFile:
+		ref, err := createRLMContextRemote(ctx, nil, cfg.BaseURL, apiKey, contextPayload)
+		if err != nil {
+			return err
+		}
+		contextRef = ref
+	}
+
+	maxIterations := flags.maxIterations
+	maxDepth := flags.maxDepth
+	maxSubcalls := flags.maxSubcalls
+
+	req := rlmExecuteRemoteRequest{
+		Model:         model,
+		Query:         query,
+		Context:       contextInline,
+		ContextRef:    contextRef,
+		SystemPrompt:  systemPrompt,
+		MaxIterations: &maxIterations,
+		MaxDepth:      &maxDepth,
+		MaxSubcalls:   &maxSubcalls,
+	}
+	if flags.execTimeoutMS != 0 {
+		timeout := flags.execTimeoutMS
+		req.TimeoutMS = &timeout
+	}
+
+	result, err := executeRLMRemote(ctx, nil, cfg.BaseURL, apiKey, req)
+	if err != nil {
+		return err
+	}
+
+	if cfg.Output == outputFormatJSON {
+		return writeRawJSON(os.Stdout, result.Raw)
+	}
+
+	writeRLMProgress(os.Stderr, result.Progress)
+	return writeRLMAnswer(os.Stdout, result.Answer)
+}
+
+func executeRLMRemote(ctx context.Context, httpClient *http.Client, baseURL string, apiKey sdk.APIKeyAuth, req rlmExecuteRemoteRequest) (rlmExecuteRemoteResult, error) {
+	endpoint := strings.TrimRight(strings.TrimSpace(baseURL), "/") + "/rlm/execute"
+	if endpoint == "" {
+		return rlmExecuteRemoteResult{}, errors.New("base URL is required")
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return rlmExecuteRemoteResult{}, fmt.Errorf("encode rlm execute request: %w", err)
+	}
+
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return rlmExecuteRemoteResult{}, fmt.Errorf("build rlm execute request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey != nil && strings.TrimSpace(apiKey.String()) != "" {
+		httpReq.Header.Set("X-ModelRelay-Api-Key", apiKey.String())
+	}
+	if header := strings.TrimSpace(clientHeader()); header != "" {
+		httpReq.Header.Set("X-ModelRelay-Client", header)
+	}
+
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return rlmExecuteRemoteResult{}, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return rlmExecuteRemoteResult{}, fmt.Errorf("read rlm execute response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = resp.Status
+		}
+		return rlmExecuteRemoteResult{}, fmt.Errorf("rlm execute failed (%d): %s", resp.StatusCode, msg)
+	}
+
+	var partial struct {
+		Answer   json.RawMessage           `json:"answer"`
+		Progress []rlmrunner.ProgressEvent `json:"progress,omitempty"`
+	}
+	if err := json.Unmarshal(body, &partial); err != nil {
+		return rlmExecuteRemoteResult{}, fmt.Errorf("decode rlm execute response: %w", err)
+	}
+
+	return rlmExecuteRemoteResult{
+		Raw:      body,
+		Answer:   partial.Answer,
+		Progress: partial.Progress,
+	}, nil
+}
+
+func createRLMContextRemote(ctx context.Context, httpClient *http.Client, baseURL string, apiKey sdk.APIKeyAuth, contextPayload json.RawMessage) (string, error) {
+	endpoint := strings.TrimRight(strings.TrimSpace(baseURL), "/") + "/rlm/context"
+	if endpoint == "" {
+		return "", errors.New("base URL is required")
+	}
+	payload, err := json.Marshal(rlmContextCreateRequest{Context: contextPayload})
+	if err != nil {
+		return "", fmt.Errorf("encode rlm context request: %w", err)
+	}
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return "", fmt.Errorf("build rlm context request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey != nil && strings.TrimSpace(apiKey.String()) != "" {
+		httpReq.Header.Set("X-ModelRelay-Api-Key", apiKey.String())
+	}
+	if header := strings.TrimSpace(clientHeader()); header != "" {
+		httpReq.Header.Set("X-ModelRelay-Client", header)
+	}
+
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read rlm context response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = resp.Status
+		}
+		return "", fmt.Errorf("rlm context upload failed (%d): %s", resp.StatusCode, msg)
+	}
+
+	var parsed rlmContextCreateResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("decode rlm context response: %w", err)
+	}
+	if strings.TrimSpace(parsed.ID) == "" {
+		return "", errors.New("rlm context response missing id")
+	}
+	return parsed.ID, nil
+}
+
+func validateRLMRemoteAttachments(files []rlmFileAttachment) error {
+	for _, file := range files {
+		if strings.TrimSpace(file.Text) == "" {
+			label := file.Name
+			if strings.TrimSpace(label) == "" {
+				label = file.Path
+			}
+			if strings.TrimSpace(label) == "" {
+				label = "attachment"
+			}
+			return fmt.Errorf("remote RLM requires inline text for %q (use --inline-text-max-bytes or drop --remote)", label)
+		}
+	}
+	return nil
+}
+
+func stripRemoteAttachmentPaths(files []rlmFileAttachment) []rlmFileAttachment {
+	if len(files) == 0 {
+		return files
+	}
+	out := make([]rlmFileAttachment, 0, len(files))
+	for _, file := range files {
+		file.Path = ""
+		out = append(out, file)
+	}
+	return out
+}
+
+func appendSystemPrompt(base, addition string) string {
+	if strings.TrimSpace(addition) == "" {
+		return strings.TrimSpace(base)
+	}
+	if strings.TrimSpace(base) == "" {
+		return strings.TrimSpace(addition)
+	}
+	return strings.TrimSpace(base) + "\n\n" + strings.TrimSpace(addition)
+}
+
+func writeRLMProgress(w io.Writer, events []rlmrunner.ProgressEvent) {
+	for _, evt := range events {
+		if strings.TrimSpace(evt.Status) == "" {
+			continue
+		}
+		fmt.Fprintf(w, "rlm: %s\n", evt.Status)
+	}
+}
+
+func writeRLMAnswer(w io.Writer, raw json.RawMessage) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(trimmed, &text); err == nil {
+		_, err = fmt.Fprintln(w, text)
+		return err
+	}
+	var value any
+	if err := json.Unmarshal(trimmed, &value); err == nil {
+		formatted, err := json.MarshalIndent(value, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(append(formatted, '\n'))
+		return err
+	}
+	_, err := fmt.Fprintln(w, string(trimmed))
+	return err
+}
+
+func writeRawJSON(w io.Writer, raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, raw, "", "  "); err != nil {
+		_, err = w.Write(append(raw, '\n'))
+		return err
+	}
+	_, err := w.Write(append(buf.Bytes(), '\n'))
+	return err
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }

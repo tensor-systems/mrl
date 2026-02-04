@@ -192,6 +192,9 @@ mrl rlm "Summarize the data" -a ./large_dataset.csv
 mrl rlm "Summarize all datasets" -a ./data/*.csv -a ./logs/*.json
 ```
 
+Use `--remote` to run hosted RLM on ModelRelay (`/rlm/execute`). Remote mode only supports inline text attachments (no local file paths).
+If you need large or binary files, use local mode.
+
 Flags:
 
 | Flag | Description |
@@ -209,6 +212,7 @@ Flags:
 | `--inline-text-max-bytes` | Max inline text bytes per file (0 uses default 1MB) |
 | `--system` | Custom instructions prepended to the default RLM system prompt |
 | `--system-override` | Replace the entire system prompt instead of prepending |
+| `--remote` | Run hosted RLM via `/rlm/execute` instead of local Python |
 
 The CLI builds a JSON context from attached files and exposes it as `context` in Python. Small text files are also loaded into `context["files"][i]["text"]` for easier scanning.
 
