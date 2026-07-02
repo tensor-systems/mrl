@@ -66,7 +66,7 @@ Environment variables:
 
 ```bash
 export MODELRELAY_API_KEY=mr_sk_...
-export MODELRELAY_MODEL=claude-sonnet-4-5  # default model
+export MODELRELAY_MODEL=claude-sonnet-5  # default model
 export MODELRELAY_PROJECT_ID=...           # UUID (optional)
 export MODELRELAY_API_BASE_URL=...         # optional
 ```
@@ -76,7 +76,7 @@ Config file (`~/.config/mrl/config.toml`):
 ```toml
 [profiles.default]
 api_key = "mr_sk_..."
-model = "claude-sonnet-4-5"
+model = "claude-sonnet-5"
 base_url = "https://api.modelrelay.ai/api/v1"
 project_id = "<uuid>"
 output = "table"  # or "json"
@@ -90,7 +90,7 @@ trace = true
 Manage config with:
 
 ```bash
-mrl config set --api-key mr_sk_... --model claude-sonnet-4-5
+mrl config set --api-key mr_sk_... --model claude-sonnet-5
 mrl config set --allow-all --trace  # enable for `mrl do`
 mrl config set --profile work --model gpt-5.2
 mrl config use work
@@ -246,7 +246,7 @@ Enable the local `bash` tool (deny-by-default) and run a loop:
 
 ```bash
 mrl agent loop \
-  --model claude-sonnet-4-5 \
+  --model claude-sonnet-5 \
   --tool bash \
   --bash-allow "git " \
   --input "List recent commits and summarize them"
@@ -256,7 +256,7 @@ Include `tasks_write` for progress tracking (state handle optional):
 
 ```bash
 mrl agent loop \
-  --model claude-sonnet-4-5 \
+  --model claude-sonnet-5 \
   --tool bash \
   --tool tasks_write \
   --state-ttl-sec 86400 \
@@ -268,7 +268,7 @@ Enable local filesystem tools (`fs.*`):
 
 ```bash
 mrl agent loop \
-  --model claude-sonnet-4-5 \
+  --model claude-sonnet-5 \
   --tool fs \
   --input "Search for TODOs in this repo"
 ```
@@ -307,7 +307,7 @@ schema = { type = "object", properties = { message = { type = "string" } }, requ
 Run with:
 
 ```bash
-mrl agent loop --model claude-sonnet-4-5 --tools-file ./tools.toml --input "Audit this repo"
+mrl agent loop --model claude-sonnet-5 --tools-file ./tools.toml --input "Audit this repo"
 ```
 
 ### List models
@@ -400,11 +400,11 @@ profile). A tier is either a flat `subscription` (Stripe price) or a metered
 # A flat Pro subscription ($10/mo) billed via Stripe.
 mrl tier create --code pro --name "Pro" --billing-mode subscription \
   --provider stripe --price 1000 --interval month \
-  --model gemini-3-flash-preview --default-model gemini-3-flash-preview
+  --model gemini-3.5-flash --default-model gemini-3.5-flash
 
 # A pay-as-you-go tier seeded with $1 of promo credit.
 mrl tier create --code paygo --name "Pay as you go" --billing-mode paygo \
-  --promo-credits 100 --model gemini-3-flash-preview --default-model gemini-3-flash-preview
+  --promo-credits 100 --model gemini-3.5-flash --default-model gemini-3.5-flash
 ```
 
 | Flag | Description |

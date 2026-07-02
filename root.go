@@ -27,7 +27,7 @@ Examples:
   mrl "What is 2 + 2?"
   mrl "Write a haiku" --stream
   mrl "Explain recursion" --model gpt-5.2 --usage
-  mrl config set --model claude-sonnet-4-5`,
+  mrl config set --model claude-sonnet-5`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.ArbitraryArgs,
