@@ -53,6 +53,9 @@ func newRLMCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&flags.systemOverride, "system-override", false, "Replace the entire system prompt instead of prepending")
 	cmd.Flags().StringVar(&flags.toolChoice, "tool-choice", "", "Tool choice mode (unsupported for rlm-core)")
 	cmd.Flags().BoolVar(&flags.remote, "remote", false, "Run RLM on ModelRelay (/rlm/execute) instead of local Python")
+	cmd.Flags().StringVar(&flags.db, "db", "", "SQLite database file to expose as a read-only SQL data source")
+	cmd.Flags().StringVar(&flags.dbName, "db-name", "db", "Sandbox name for the SQL data source (e.g. db.query(...))")
+	cmd.Flags().StringVar(&flags.sqlProfile, "sql-profile", "", "SQL profile ID for the read-only policy (default: permissive read-only policy)")
 
 	return cmd
 }
@@ -74,6 +77,9 @@ type rlmFlags struct {
 	inlineTextMaxBytes int64
 	toolChoice         string
 	remote             bool
+	db                 string
+	dbName             string
+	sqlProfile         string
 }
 
 const (
@@ -204,15 +210,23 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 	}
 
 	if flags.remote {
+		if strings.TrimSpace(flags.db) != "" {
+			return errors.New("--db is local-mode only for now: the SQL data source executes at the edge, next to the database file")
+		}
 		return runRLMRemote(ctx, cfg, apiKey, model, strings.Join(args, " "), contextPayload, plan, flags, len(files) > 0)
 	}
 
 	usage := &rlmUsage{}
-	subcallEndpoint, rootEndpoint, token, closeServer, err := startLocalRLMServer(ctx, client, model, flags.maxDepth, flags.maxSubcalls, usage)
+	server, err := startLocalRLMServer(ctx, client, cfg, model, flags.maxDepth, flags.maxSubcalls, usage)
 	if err != nil {
 		return err
 	}
-	defer closeServer()
+	defer server.Close()
+
+	dataSources, defaultSource, err := buildLocalSQLDataSource(flags, cfg, server)
+	if err != nil {
+		return err
+	}
 
 	query := strings.Join(args, " ")
 	sessionID, err := randomToken()
@@ -243,14 +257,16 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 		SystemPromptAdditions: systemAdditions,
 		Context:               contextInline,
 		ContextPath:           contextFile,
+		DataSources:           dataSources,
+		DefaultSource:         defaultSource,
 		MaxIterations:         flags.maxIterations,
 		MaxDepth:              flags.maxDepth,
 		MaxSubcalls:           flags.maxSubcalls,
 		ExecTimeoutMS:         flags.execTimeoutMS,
 		MaxOutputChars:        defaultRLMMaxOutputChars,
-		Token:                 token,
-		RootEndpoint:          rootEndpoint,
-		SubcallEndpoint:       subcallEndpoint,
+		Token:                 server.Token,
+		RootEndpoint:          server.RootEndpoint,
+		SubcallEndpoint:       server.SubcallEndpoint,
 		Session:               sessionID,
 		SessionIndex:          1,
 	}
@@ -343,13 +359,80 @@ func callLLM(ctx context.Context, client *sdk.Client, model string, input []llm.
 	return resp, nil
 }
 
-func startLocalRLMServer(ctx context.Context, client *sdk.Client, defaultModel string, maxDepth, maxSubcalls int, usage *rlmUsage) (subcallEndpoint string, rootEndpoint string, token string, closeFn func(), err error) {
-	if maxSubcalls < 0 {
-		return "", "", "", nil, errors.New("max_subcalls must be >= 0")
+// defaultLocalSQLPolicy is the inline read-only policy used when --db is given
+// without --sql-profile: SELECT-only with sane limits, but otherwise permissive
+// (aggregates, joins, subqueries) — it's the user's own local file, and the
+// restrictive knobs exist for locked-down customer profiles, not for this. The
+// cloud validator enforces it; the SQLite file is also opened mode=ro at the
+// edge as defense in depth.
+var defaultLocalSQLPolicy = json.RawMessage(`{
+	"dialect": "sqlite",
+	"read_only": true,
+	"limits": {"default_limit": 1000, "max_limit": 10000, "timeout_ms": 5000},
+	"aggregations": {"allowed": true, "functions": ["count", "sum", "avg", "min", "max", "total", "group_concat"]},
+	"subqueries": {"allowed": true}
+}`)
+
+// buildLocalSQLDataSource turns --db/--db-name/--sql-profile into the runner's
+// declarative data_sources entry (docs/design/sql-data-source.md §4): the spec
+// carries the SQLite path (edge, local machine) and the loopback validate URL —
+// never database credentials, and rows never leave the process.
+func buildLocalSQLDataSource(flags *rlmFlags, cfg runtimeConfig, server localRLMServer) ([]rlmrunner.DataSourceSpec, string, error) {
+	dbPath := strings.TrimSpace(flags.db)
+	if dbPath == "" {
+		return nil, "", nil
 	}
-	token, err = randomToken()
+	if strings.TrimSpace(cfg.APIKey) == "" {
+		return nil, "", errors.New("--db requires an API key (the SQL policy check runs via ModelRelay /sql/validate)")
+	}
+	absPath, err := filepath.Abs(dbPath)
 	if err != nil {
-		return "", "", "", nil, err
+		return nil, "", err
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("--db: %w", err)
+	}
+	if info.IsDir() {
+		return nil, "", fmt.Errorf("--db: %s is a directory, expected a SQLite file", absPath)
+	}
+	name := strings.TrimSpace(flags.dbName)
+	if name == "" {
+		name = "db"
+	}
+	spec := rlmrunner.DataSourceSpec{
+		Type:          "sql",
+		Name:          name,
+		SQLitePath:    absPath,
+		ValidateURL:   server.ValidateURL,
+		ValidateToken: server.Token,
+	}
+	if profile := strings.TrimSpace(flags.sqlProfile); profile != "" {
+		spec.ProfileID = profile
+	} else {
+		spec.Policy = defaultLocalSQLPolicy
+	}
+	return []rlmrunner.DataSourceSpec{spec}, name, nil
+}
+
+// localRLMServer is the loopback server the local runner talks to: LLM
+// root/subcall proxies, plus a /sql/validate forwarder when a SQL data source
+// is attached (the runner sends only the SQL string; mrl adds the API key).
+type localRLMServer struct {
+	SubcallEndpoint string
+	RootEndpoint    string
+	ValidateURL     string
+	Token           string
+	Close           func()
+}
+
+func startLocalRLMServer(ctx context.Context, client *sdk.Client, cfg runtimeConfig, defaultModel string, maxDepth, maxSubcalls int, usage *rlmUsage) (localRLMServer, error) {
+	if maxSubcalls < 0 {
+		return localRLMServer{}, errors.New("max_subcalls must be >= 0")
+	}
+	token, err := randomToken()
+	if err != nil {
+		return localRLMServer{}, err
 	}
 	counter := 0
 
@@ -374,8 +457,77 @@ func startLocalRLMServer(ctx context.Context, client *sdk.Client, defaultModel s
 	mux := http.NewServeMux()
 	mux.Handle("/rlm/subcall", subcallHandler)
 	mux.Handle("/rlm/root", rootHandler)
+	mux.Handle("/sql/validate", &localSQLValidateHandler{
+		ctx:     ctx,
+		baseURL: cfg.BaseURL,
+		apiKey:  strings.TrimSpace(cfg.APIKey),
+		token:   token,
+	})
 	server := httptest.NewServer(mux)
-	return server.URL + "/rlm/subcall", server.URL + "/rlm/root", token, server.Close, nil
+	return localRLMServer{
+		SubcallEndpoint: server.URL + "/rlm/subcall",
+		RootEndpoint:    server.URL + "/rlm/root",
+		ValidateURL:     server.URL + "/sql/validate",
+		Token:           token,
+		Close:           server.Close,
+	}, nil
+}
+
+// localSQLValidateHandler forwards the runner's policy-validation calls to the
+// cloud /sql/validate endpoint with mrl's credentials. Only the SQL string and
+// policy/profile reference pass through — never rows, never the database.
+type localSQLValidateHandler struct {
+	ctx     context.Context
+	baseURL string
+	apiKey  string
+	token   string
+}
+
+func (h *localSQLValidateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if strings.TrimSpace(auth[len("bearer "):]) != h.token {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "read request", http.StatusBadRequest)
+		return
+	}
+	endpoint := strings.TrimSuffix(h.baseURL, "/") + "/sql/validate"
+	req, err := http.NewRequestWithContext(h.ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, "build request", http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if h.apiKey != "" {
+		req.Header.Set("X-ModelRelay-Api-Key", h.apiKey)
+	}
+	if header := strings.TrimSpace(clientHeader()); header != "" {
+		req.Header.Set("X-ModelRelay-Client", header)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("validate call failed: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+	w.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(w, io.LimitReader(resp.Body, 1<<20)); err != nil {
+		log.Printf("warning: copy validate response: %v", err)
+	}
 }
 
 type localSubcallHandler struct {

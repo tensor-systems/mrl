@@ -192,7 +192,31 @@ mrl rlm "Summarize the data" -a ./large_dataset.csv
 mrl rlm "Summarize all datasets" -a ./data/*.csv -a ./logs/*.json
 ```
 
-Use `--remote` to run hosted RLM on ModelRelay (`/rlm/execute`). Remote mode only supports inline text attachments (no local file paths).
+#### Connect a database
+
+Point `--db` at a SQLite file to expose it as a read-only SQL data source. The
+model navigates the schema, writes SQL, and computes over the rows in Python —
+`rows = db.query("SELECT ...")` returns a `list[dict]` variable, not text:
+
+```bash
+mrl rlm --db ./app.db "Which customers churned last month, and what did they have in common?"
+```
+
+Every statement is validated by ModelRelay's read-only policy engine
+(`/sql/validate`) before it executes — SELECT-only, with row limits and query
+timeouts. Only the SQL string leaves your machine; rows never do, and the file
+is also opened read-only at the SQLite layer. Pass `--sql-profile <id>` to use
+a stricter saved policy (table/column allowlists) instead of the permissive
+default.
+
+> Note: in local mode the RLM sandbox runs the model's own Python on your
+> machine, so the SQL policy is a **guardrail** (LIMITs, shaping), not a
+> boundary against the model — like any local script, the model could open your
+> file directly. The real controls are your OS file permissions and which
+> database you point at. Strict allowlists become a security boundary in hosted
+> mode. Point `--db` only at databases you're comfortable letting the model read.
+
+Use `--remote` to run hosted RLM on ModelRelay (`/rlm/execute`). Remote mode only supports inline text attachments (no local file paths) and does not support `--db` yet.
 If you need large or binary files, use local mode.
 
 Flags:
@@ -212,6 +236,9 @@ Flags:
 | `--inline-text-max-bytes` | Max inline text bytes per file (0 uses default 1MB) |
 | `--system` | Custom instructions prepended to the default RLM system prompt |
 | `--system-override` | Replace the entire system prompt instead of prepending |
+| `--db` | SQLite file to expose as a read-only SQL data source |
+| `--db-name` | Sandbox name for the SQL data source (default: `db`) |
+| `--sql-profile` | SQL profile ID for the read-only policy (default: permissive read-only) |
 | `--remote` | Run hosted RLM via `/rlm/execute` instead of local Python |
 
 The CLI builds a JSON context from attached files and exposes it as `context` in Python. Small text files are also loaded into `context["files"][i]["text"]` for easier scanning.
