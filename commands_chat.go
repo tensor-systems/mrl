@@ -199,6 +199,12 @@ func newPromptClient(cfg runtimeConfig) (*sdk.Client, error) {
 	if strings.TrimSpace(cfg.BaseURL) != "" {
 		opts = append(opts, sdk.WithBaseURL(cfg.BaseURL))
 	}
+	// Honor --timeout for individual requests too: the SDK's 60s per-request
+	// default otherwise aborts long completions (e.g. large-context prompts
+	// with thinking) even when the session timeout is much higher.
+	if cfg.Timeout > 0 {
+		opts = append(opts, sdk.WithRequestTimeout(cfg.Timeout))
+	}
 
 	if strings.TrimSpace(cfg.APIKey) == "" {
 		return nil, errors.New("api key required")
