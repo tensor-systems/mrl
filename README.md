@@ -34,7 +34,7 @@ echo "What is the capital of France?" | mrl
 ### Homebrew (macOS/Linux)
 
 ```bash
-brew install modelrelay/tap/mrl
+brew install tensor-systems/tap/mrl
 ```
 
 To upgrade:
@@ -56,7 +56,7 @@ go install github.com/modelrelay/mrl@latest
 Or build locally:
 
 ```bash
-git clone https://github.com/modelrelay/mrl.git
+git clone https://github.com/tensor-systems/mrl.git
 cd mrl && go build -o mrl
 ```
 
