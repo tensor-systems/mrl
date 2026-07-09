@@ -342,27 +342,56 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 	}
 	runnerResult, err := rlmrunner.RunWithSession(ctx, session, runtimeDir, runnerReq, runOpts)
 	if err != nil {
-		if runnerResult.Response.Error != nil && runnerResult.Response.Error.Message != "" {
-			return errors.New(runnerResult.Response.Error.Message)
+		// Prefer the runner's structured error message when present; still emit
+		// whatever partial response/trajectory we parsed (issue #1597).
+		runErr := err
+		if runnerResult.Response.Error != nil && strings.TrimSpace(runnerResult.Response.Error.Message) != "" {
+			runErr = errors.New(runnerResult.Response.Error.Message)
 		}
-		return err
+		return writeRLMLocalOutcome(cfg, usage, runnerResult.Response, runErr)
 	}
 	runnerResp := runnerResult.Response
 	if !runnerResp.Ready {
 		// A post-exhaustion extracted answer is a usable best-effort result;
 		// it is flagged so callers never mistake it for a confirmed one.
 		if !runnerResp.Extracted || strings.TrimSpace(runnerResp.Answer) == "" {
-			return errors.New("max iterations exceeded")
+			return writeRLMLocalOutcome(cfg, usage, runnerResp, errors.New("max iterations exceeded"))
 		}
 		fmt.Fprintln(os.Stderr, "rlm: iteration budget exhausted; answer extracted from the trajectory (not confirmed)")
 	}
 
-	answerPayload, err := json.Marshal(runnerResp.Answer)
+	return writeRLMLocalOutcome(cfg, usage, runnerResp, nil)
+}
+
+// rlmJSONError is the machine-readable failure block for `mrl rlm --json`.
+type rlmJSONError struct {
+	Type    string `json:"type,omitempty"`
+	Message string `json:"message"`
+}
+
+// rlmJSONResult is the stdout envelope for `mrl rlm --json` (success and failure).
+// On failure Error is set and the process still exits non-zero; trajectory /
+// partial answer are preserved when available (modelrelay#1597).
+type rlmJSONResult struct {
+	Answer     json.RawMessage           `json:"answer,omitempty"`
+	Iterations int                       `json:"iterations"`
+	Subcalls   int                       `json:"subcalls"`
+	TotalUsage workflow.TokenUsage       `json:"total_usage,omitempty"`
+	Trajectory []workflow.RLMIterationV1 `json:"trajectory,omitempty"`
+	Ready      bool                      `json:"ready"`
+	Extracted  bool                      `json:"extracted,omitempty"`
+	Error      *rlmJSONError             `json:"error,omitempty"`
+}
+
+func buildRLMJSONResult(usage *rlmUsage, resp rlmrunner.RunnerResponse, runErr error) (rlmJSONResult, error) {
+	// Always marshal answer (including "") so clients can distinguish empty
+	// answer from missing field — matches pre-#1597 success encoding.
+	answerPayload, err := json.Marshal(resp.Answer)
 	if err != nil {
-		return err
+		return rlmJSONResult{}, err
 	}
-	trajectory := make([]workflow.RLMIterationV1, 0, len(runnerResp.Trajectory))
-	for _, entry := range runnerResp.Trajectory {
+	trajectory := make([]workflow.RLMIterationV1, 0, len(resp.Trajectory))
+	for _, entry := range resp.Trajectory {
 		trajectory = append(trajectory, workflow.RLMIterationV1{
 			Iteration: entry.Iteration,
 			Code:      entry.CodeExecuted,
@@ -373,22 +402,62 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 	if usage != nil {
 		totalUsage = usage.snapshot()
 	}
-	result := workflow.RLMResultV1{
+	result := rlmJSONResult{
 		Answer:     answerPayload,
-		Iterations: runnerResp.Iterations,
-		Subcalls:   runnerResp.Subcalls,
+		Iterations: resp.Iterations,
+		Subcalls:   resp.Subcalls,
 		TotalUsage: totalUsage,
 		Trajectory: trajectory,
+		Ready:      resp.Ready,
+		Extracted:  resp.Extracted,
 	}
+	if runErr != nil {
+		errType := "RLMError"
+		msg := runErr.Error()
+		if resp.Error != nil {
+			if strings.TrimSpace(resp.Error.Type) != "" {
+				errType = resp.Error.Type
+			}
+			if strings.TrimSpace(resp.Error.Message) != "" {
+				msg = resp.Error.Message
+			}
+		}
+		result.Error = &rlmJSONError{Type: errType, Message: msg}
+	}
+	return result, nil
+}
 
+// writeRLMLocalOutcome prints the RLM result. In --json mode it always writes the
+// full envelope (including on failure) so scripts never see empty stdout (#1597).
+// Non-JSON failure mode returns the error without writing an answer line.
+func writeRLMLocalOutcome(cfg runtimeConfig, usage *rlmUsage, resp rlmrunner.RunnerResponse, runErr error) error {
+	return writeRLMLocalOutcomeTo(os.Stdout, cfg, usage, resp, runErr)
+}
+
+func writeRLMLocalOutcomeTo(w io.Writer, cfg runtimeConfig, usage *rlmUsage, resp rlmrunner.RunnerResponse, runErr error) error {
 	if cfg.Output == outputFormatJSON {
-		enc := json.NewEncoder(os.Stdout)
+		result, err := buildRLMJSONResult(usage, resp, runErr)
+		if err != nil {
+			if runErr != nil {
+				return errors.Join(runErr, err)
+			}
+			return err
+		}
+		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		return enc.Encode(result)
+		if err := enc.Encode(result); err != nil {
+			if runErr != nil {
+				return errors.Join(runErr, err)
+			}
+			return err
+		}
+		return runErr
 	}
-
-	fmt.Println(runnerResp.Answer)
-	return nil
+	if runErr != nil {
+		return runErr
+	}
+	_, err := fmt.Fprintln(w, resp.Answer)
+	return err
 }
 
 func callLLM(ctx context.Context, client *sdk.Client, model string, input []llm.InputItem, maxOutputTokens int64, reasoningEffort string) (*sdk.Response, error) {
