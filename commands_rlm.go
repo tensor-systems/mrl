@@ -58,7 +58,7 @@ func newRLMCmd() *cobra.Command {
 	cmd.Flags().StringVar(&flags.sqlProfile, "sql-profile", "", "SQL profile ID for the read-only policy (default: permissive read-only policy)")
 	cmd.Flags().Int64Var(&flags.subcallMaxOutputTokens, "subcall-max-output-tokens", 0, "Max output tokens per llm_query/llm_batch subcall (0 = server default, 2048)")
 	cmd.Flags().StringVar(&flags.subcallModel, "subcall-model", "", "Model for llm_query/llm_batch subcalls, e.g. a cheaper non-reasoning model (default: the root model)")
-	cmd.Flags().StringVar(&flags.subcallReasoningEffort, "subcall-reasoning-effort", "", "Reasoning effort for subcalls: none, low, medium, or high (default: server default, none)")
+	cmd.Flags().StringVar(&flags.subcallReasoningEffort, "subcall-reasoning-effort", "", "Reasoning effort for subcalls: none, minimal, low, medium, high, or xhigh (default: server default, none)")
 
 	return cmd
 }
@@ -100,7 +100,7 @@ const (
 // validSubcallReasoningEffort mirrors the server-side allowed values.
 func validSubcallReasoningEffort(effort string) bool {
 	switch effort {
-	case "", "none", "low", "medium", "high":
+	case "", "none", "minimal", "low", "medium", "high", "xhigh":
 		return true
 	default:
 		return false
@@ -208,7 +208,7 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 	}
 	flags.subcallReasoningEffort = strings.TrimSpace(flags.subcallReasoningEffort)
 	if !validSubcallReasoningEffort(flags.subcallReasoningEffort) {
-		return errors.New("invalid subcall-reasoning-effort (want none, low, medium, or high)")
+		return errors.New("invalid subcall-reasoning-effort (want none, minimal, low, medium, high, or xhigh)")
 	}
 	flags.subcallModel = strings.TrimSpace(flags.subcallModel)
 
@@ -755,7 +755,7 @@ func (h *localSubcallHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	if req.ReasoningEffort != nil {
 		effort := strings.TrimSpace(*req.ReasoningEffort)
 		if !validSubcallReasoningEffort(effort) {
-			http.Error(w, "invalid reasoning_effort (want none, low, medium, or high)", http.StatusBadRequest)
+			http.Error(w, "invalid reasoning_effort (want none, minimal, low, medium, high, or xhigh)", http.StatusBadRequest)
 			return
 		}
 		reasoningEffort = effort

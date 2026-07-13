@@ -178,3 +178,16 @@ func TestLocalSubcallHandler_RejectsInvalidCostControls(t *testing.T) {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
+
+func TestValidSubcallReasoningEffort_AcceptsFullLadderAndRejectsJunk(t *testing.T) {
+	for _, effort := range []string{"", "none", "minimal", "low", "medium", "high", "xhigh"} {
+		if !validSubcallReasoningEffort(effort) {
+			t.Errorf("validSubcallReasoningEffort(%q) = false, want true", effort)
+		}
+	}
+	for _, effort := range []string{"max", "MEDIUM", "ultra", "pro"} {
+		if validSubcallReasoningEffort(effort) {
+			t.Errorf("validSubcallReasoningEffort(%q) = true, want false", effort)
+		}
+	}
+}
