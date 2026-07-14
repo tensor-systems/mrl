@@ -286,9 +286,26 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 	case rlm.ContextLoadFile:
 		contextFile = plan.ContextPath
 	}
+	subcallOutputTokens := flags.subcallMaxOutputTokens
+	if subcallOutputTokens <= 0 {
+		subcallOutputTokens = rlmrunner.DefaultSubcallOutputTokens
+	}
+	budget, err := rlmrunner.NewBudget(
+		rlmrunner.DefaultTotalTokenBudget, flags.maxSubcalls, flags.maxDepth, rlmrunner.DefaultRunnerTimeoutMS,
+		rlmrunner.DefaultRootOutputTokens, subcallOutputTokens,
+	)
+	if err != nil {
+		return err
+	}
+	sandbox, err := rlmrunner.NewRunnerSandbox(defaultRLMMaxOutputChars, flags.execTimeoutMS, defaultRLMMaxOutputChars)
+	if err != nil {
+		return err
+	}
 
 	runnerReq := rlmrunner.RunnerRequest{
 		Model:                  model,
+		Budget:                 budget,
+		Sandbox:                sandbox,
 		Question:               query,
 		SystemPrompt:           systemPrompt,
 		SystemPromptAdditions:  systemAdditions,
