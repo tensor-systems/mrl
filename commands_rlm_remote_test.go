@@ -21,6 +21,9 @@ func TestRLMExecuteRemoteRequest_HasNoLegacyMaxIterationsControl(t *testing.T) {
 	if bytes.Contains(payload, []byte("max_iterations")) {
 		t.Fatalf("remote request leaked removed control: %s", payload)
 	}
+	if !bytes.Contains(payload, []byte(`"seed":null`)) {
+		t.Fatalf("remote request omitted explicit unavailable seed: %s", payload)
+	}
 }
 
 func TestRunRLMRemote_RejectsLocalExecutionTimeout(t *testing.T) {
@@ -40,6 +43,7 @@ func TestExecuteRLMRemote_Progress(t *testing.T) {
 		gotClient string
 		gotModel  string
 		gotQuery  string
+		gotSeed   *int64
 	)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,13 +57,15 @@ func TestExecuteRLMRemote_Progress(t *testing.T) {
 		}
 		gotModel = req.Model
 		gotQuery = req.Query
+		gotSeed = req.Seed
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"demo","answer":"ok","iterations":1,"subcalls":1,"usage":{},"trajectory":[],"progress":[{"status":"step 1"}]}`))
 	}))
 	t.Cleanup(server.Close)
 
-	req := rlmExecuteRemoteRequest{Model: "demo", Query: "hi"}
+	seed := int64(42)
+	req := rlmExecuteRemoteRequest{Model: "demo", Query: "hi", Seed: &seed}
 	result, err := executeRLMRemote(context.Background(), server.Client(), server.URL, sdk.SecretKey("mr_sk_test"), req)
 	if err != nil {
 		t.Fatalf("executeRLMRemote error: %v", err)
@@ -76,6 +82,9 @@ func TestExecuteRLMRemote_Progress(t *testing.T) {
 	}
 	if gotModel != "demo" || gotQuery != "hi" {
 		t.Fatalf("request model/query = %q/%q, want demo/hi", gotModel, gotQuery)
+	}
+	if gotSeed == nil || *gotSeed != 42 {
+		t.Fatalf("request seed = %v, want 42", gotSeed)
 	}
 	if len(result.Progress) != 1 || result.Progress[0].Status != "step 1" {
 		t.Fatalf("progress = %+v, want status 'step 1'", result.Progress)

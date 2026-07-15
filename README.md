@@ -229,6 +229,7 @@ Flags:
 | `--max-subcalls` | Max llm_query/llm_batch calls (default: 50) |
 | `--max-depth` | Max recursion depth (default: 1) |
 | `--exec-timeout-ms` | Local-only Python execution timeout in ms (0 uses interpreter default) |
+| `--seed` | Run-specific rollout identity/attribution value from 0 through 9,007,199,254,740,991 (omit when unavailable) |
 | `--python` | Python executable (default: python3) |
 | `--max-inline-bytes` | Max inline context bytes (0 uses interpreter default) |
 | `--max-total-bytes` | Max total context bytes (0 uses interpreter default) |

@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/modelrelay/modelrelay/platform/rlm"
+	"github.com/modelrelay/modelrelay/platform/rlmrun"
 	"github.com/modelrelay/modelrelay/platform/rlmrunner"
 	"github.com/modelrelay/modelrelay/platform/workflow"
 	sdk "github.com/modelrelay/modelrelay/sdk/go"
@@ -44,6 +45,7 @@ func newRLMCmd() *cobra.Command {
 	cmd.Flags().IntVar(&flags.maxSubcalls, "max-subcalls", 50, "Max llm_query/llm_batch calls")
 	cmd.Flags().IntVar(&flags.maxDepth, "max-depth", 1, "Max recursion depth")
 	cmd.Flags().IntVar(&flags.execTimeoutMS, "exec-timeout-ms", 0, "Local Python execution timeout in ms (0 uses interpreter default)")
+	cmd.Flags().Int64Var(&flags.seedValue, "seed", 0, fmt.Sprintf("Rollout identity/attribution value (0-%d); omit when unavailable", rlmrun.MaxSeed))
 	cmd.Flags().StringVar(&flags.pythonPath, "python", "", "Python executable (default: python3)")
 	cmd.Flags().Int64Var(&flags.maxInlineBytes, "max-inline-bytes", 0, "Max inline context bytes (0 uses interpreter default)")
 	cmd.Flags().Int64Var(&flags.maxTotalBytes, "max-total-bytes", 0, "Max total context bytes (0 uses interpreter default)")
@@ -72,6 +74,8 @@ type rlmFlags struct {
 	maxSubcalls        int
 	maxDepth           int
 	execTimeoutMS      int
+	seedValue          int64
+	seed               *int64
 	pythonPath         string
 	maxInlineBytes     int64
 	maxTotalBytes      int64
@@ -204,6 +208,15 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 	if flags.subcallMaxOutputTokens < 0 {
 		return errors.New("subcall-max-output-tokens must be >= 0")
 	}
+	if cmd.Flags().Changed("seed") {
+		seed, seedErr := rlmrun.SeedFactFromPointer(&flags.seedValue)
+		if seedErr != nil {
+			return seedErr
+		}
+		flags.seed = seed.Pointer()
+	} else {
+		flags.seed = nil
+	}
 	flags.subcallReasoningEffort = strings.TrimSpace(flags.subcallReasoningEffort)
 	if !validSubcallReasoningEffort(flags.subcallReasoningEffort) {
 		return errors.New("invalid subcall-reasoning-effort (want none, minimal, low, medium, high, or xhigh)")
@@ -324,6 +337,7 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 		SubcallEndpoint:        server.SubcallEndpoint,
 		Session:                sessionID,
 		SessionIndex:           1,
+		Seed:                   flags.seed,
 	}
 
 	interpreter := rlm.NewLocalInterpreter(rlm.LocalInterpreterConfig{
@@ -968,6 +982,7 @@ type rlmExecuteRemoteRequest struct {
 	MaxDepth               *int            `json:"max_depth,omitempty"`
 	MaxSubcalls            *int            `json:"max_subcalls,omitempty"`
 	TimeoutMS              *int            `json:"timeout_ms,omitempty"`
+	Seed                   *int64          `json:"seed"`
 	SubcallMaxOutputTokens int64           `json:"subcall_max_output_tokens,omitempty"`
 	SubcallModel           string          `json:"subcall_model,omitempty"`
 	SubcallReasoningEffort string          `json:"subcall_reasoning_effort,omitempty"`
@@ -1026,6 +1041,7 @@ func runRLMRemote(ctx context.Context, cfg runtimeConfig, apiKey sdk.APIKeyAuth,
 		SystemPrompt:           systemPrompt,
 		MaxDepth:               &maxDepth,
 		MaxSubcalls:            &maxSubcalls,
+		Seed:                   flags.seed,
 		SubcallMaxOutputTokens: flags.subcallMaxOutputTokens,
 		SubcallModel:           flags.subcallModel,
 		SubcallReasoningEffort: flags.subcallReasoningEffort,
