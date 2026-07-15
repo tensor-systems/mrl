@@ -157,6 +157,58 @@ func TestBuildLocalSQLDataSource_RejectsTwoDatabases(t *testing.T) {
 	}
 }
 
+func TestBuildLocalSQLDataSource_SnowflakeUsesOnlyBrokerCapability(t *testing.T) {
+	const tokenEnv = "MODELRELAY_TEST_SNOWFLAKE_BROKER_TOKEN"
+	token := strings.Repeat("s", 32)
+	t.Setenv(tokenEnv, token)
+	flags := &rlmFlags{
+		snowflakeBrokerURL:      "http://snowflake-edge:8787/v1/sql",
+		snowflakeBrokerTokenEnv: tokenEnv,
+		dbName:                  "warehouse",
+	}
+	specs, defaultSource, err := buildLocalSQLDataSource(flags, runtimeConfig{}, testLocalServer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 1 || defaultSource != "warehouse" || specs[0].BrokerURL != flags.snowflakeBrokerURL || specs[0].BrokerToken != token {
+		t.Fatalf("unexpected Snowflake broker source: %#v / %q", specs, defaultSource)
+	}
+	encoded, err := json.Marshal(specs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(tokenEnv)) || bytes.Contains(encoded, []byte("private_key")) || bytes.Contains(encoded, []byte("oauth")) {
+		t.Fatalf("runner spec leaked Snowflake configuration: %s", encoded)
+	}
+}
+
+func TestBuildLocalSQLDataSource_SnowflakeRejectsCallerPolicyAndAmbiguousSources(t *testing.T) {
+	const tokenEnv = "MODELRELAY_TEST_SNOWFLAKE_BROKER_TOKEN"
+	t.Setenv(tokenEnv, strings.Repeat("s", 32))
+	flags := &rlmFlags{
+		snowflakeBrokerURL: "http://snowflake-edge:8787/v1/sql", snowflakeBrokerTokenEnv: tokenEnv,
+		sqlProfile: "caller-controlled",
+	}
+	if _, _, err := buildLocalSQLDataSource(flags, runtimeConfig{}, testLocalServer()); err == nil || !strings.Contains(err.Error(), "trusted broker owns") {
+		t.Fatalf("expected caller policy rejection, got %v", err)
+	}
+	flags.sqlProfile = ""
+	flags.db = "app.db"
+	if _, _, err := buildLocalSQLDataSource(flags, runtimeConfig{}, testLocalServer()); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected source ambiguity rejection, got %v", err)
+	}
+}
+
+func TestBrokerURLWithRunIDPreservesPath(t *testing.T) {
+	got, err := brokerURLWithRunID("https://edge.example.test/v1/sql", "run/one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://edge.example.test/v1/sql?run_id=run%2Fone" {
+		t.Fatalf("unexpected tagged broker URL: %q", got)
+	}
+}
+
 func TestOpenLocalPostgresConnector_RequiresNamedEnvironmentValue(t *testing.T) {
 	const envName = "MODELRELAY_TEST_MISSING_POSTGRES_DSN"
 	t.Setenv(envName, "")

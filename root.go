@@ -82,6 +82,7 @@ Examples:
 		newVersionCmd(),
 		newDoCmd(),
 		newRLMCmd(),
+		newSnowflakeCmd(),
 	)
 
 	return root

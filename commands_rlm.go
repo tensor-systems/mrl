@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,6 +60,8 @@ func newRLMCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&flags.remote, "remote", false, "Run RLM on ModelRelay (/rlm/execute) instead of local Python")
 	cmd.Flags().StringVar(&flags.db, "db", "", "SQLite database file to expose as a read-only SQL data source")
 	cmd.Flags().StringVar(&flags.postgresDSNEnv, "postgres-dsn-env", "", "Environment variable containing a PostgreSQL DSN for a trusted read-only edge connector")
+	cmd.Flags().StringVar(&flags.snowflakeBrokerURL, "snowflake-broker-url", "", "URL of a trusted ModelRelay Edge for Snowflake broker")
+	cmd.Flags().StringVar(&flags.snowflakeBrokerTokenEnv, "snowflake-broker-token-env", "", "Environment variable containing the Snowflake broker capability token")
 	cmd.Flags().StringVar(&flags.dbName, "db-name", "db", "Sandbox name for the SQL data source (e.g. db.query(...))")
 	cmd.Flags().StringVar(&flags.sqlProfile, "sql-profile", "", "SQL profile ID for the read-only policy (default: permissive read-only policy)")
 	cmd.Flags().StringArrayVar(&flags.mcpConfigs, "mcp-config", nil, "Trusted remote MCP source config file (local/VPC mode; repeatable)")
@@ -71,29 +74,31 @@ func newRLMCmd() *cobra.Command {
 }
 
 type rlmFlags struct {
-	model              string
-	system             string
-	systemOverride     bool
-	attachments        []string
-	attachmentType     string
-	attachStdin        bool
-	maxSubcalls        int
-	maxDepth           int
-	execTimeoutMS      int
-	seedValue          int64
-	seed               *int64
-	pythonPath         string
-	maxInlineBytes     int64
-	maxTotalBytes      int64
-	inlineTextMaxBytes int64
-	toolChoice         string
-	remote             bool
-	db                 string
-	postgresDSNEnv     string
-	dbName             string
-	sqlProfile         string
-	mcpConfigs         []string
-	defaultSource      string
+	model                   string
+	system                  string
+	systemOverride          bool
+	attachments             []string
+	attachmentType          string
+	attachStdin             bool
+	maxSubcalls             int
+	maxDepth                int
+	execTimeoutMS           int
+	seedValue               int64
+	seed                    *int64
+	pythonPath              string
+	maxInlineBytes          int64
+	maxTotalBytes           int64
+	inlineTextMaxBytes      int64
+	toolChoice              string
+	remote                  bool
+	db                      string
+	postgresDSNEnv          string
+	snowflakeBrokerURL      string
+	snowflakeBrokerTokenEnv string
+	dbName                  string
+	sqlProfile              string
+	mcpConfigs              []string
+	defaultSource           string
 	// Subcall cost controls (rlm-core#25); zero values mean server defaults.
 	subcallMaxOutputTokens int64
 	subcallModel           string
@@ -263,8 +268,8 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 	}
 
 	if flags.remote {
-		if strings.TrimSpace(flags.db) != "" || strings.TrimSpace(flags.postgresDSNEnv) != "" || len(flags.mcpConfigs) > 0 {
-			return errors.New("--db, --postgres-dsn-env, and --mcp-config are local/VPC-mode only: trusted data-provider transports execute at the customer-controlled edge")
+		if strings.TrimSpace(flags.db) != "" || strings.TrimSpace(flags.postgresDSNEnv) != "" || strings.TrimSpace(flags.snowflakeBrokerURL) != "" || len(flags.mcpConfigs) > 0 {
+			return errors.New("--db, --postgres-dsn-env, --snowflake-broker-url, and --mcp-config are local/VPC-mode only: trusted data-provider transports execute at the customer-controlled edge")
 		}
 		return runRLMRemote(ctx, cfg, apiKey, model, strings.Join(args, " "), contextPayload, plan, flags, len(files) > 0)
 	}
@@ -309,6 +314,16 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 	sessionID, err := randomToken()
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(flags.snowflakeBrokerURL) != "" {
+		for i := range dataSources {
+			if dataSources[i].Type == "sql" && dataSources[i].BrokerURL != "" {
+				dataSources[i].BrokerURL, err = brokerURLWithRunID(dataSources[i].BrokerURL, sessionID)
+				if err != nil {
+					return err
+				}
+			}
+		}
 	}
 	systemPrompt := ""
 	systemAdditions := ""
@@ -377,6 +392,12 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 	var runnerEnv []string
 	if postgresEnv := strings.TrimSpace(flags.postgresDSNEnv); postgresEnv != "" {
 		runnerEnv = environmentWithoutVariable(os.Environ(), postgresEnv)
+	}
+	if tokenEnv := strings.TrimSpace(flags.snowflakeBrokerTokenEnv); tokenEnv != "" {
+		if runnerEnv == nil {
+			runnerEnv = os.Environ()
+		}
+		runnerEnv = environmentWithoutVariable(runnerEnv, tokenEnv)
 	}
 	for _, secretEnv := range mcpMounts.SecretEnvNames {
 		if runnerEnv == nil {
@@ -575,13 +596,23 @@ var defaultLocalPostgresPolicy = json.RawMessage(`{
 func buildLocalSQLDataSource(flags *rlmFlags, cfg runtimeConfig, server localRLMServer) ([]rlmrunner.DataSourceSpec, string, error) {
 	dbPath := strings.TrimSpace(flags.db)
 	postgresEnv := strings.TrimSpace(flags.postgresDSNEnv)
-	if dbPath != "" && postgresEnv != "" {
-		return nil, "", errors.New("--db and --postgres-dsn-env are mutually exclusive")
+	snowflakeURL := strings.TrimSpace(flags.snowflakeBrokerURL)
+	configured := 0
+	for _, present := range []bool{dbPath != "", postgresEnv != "", snowflakeURL != ""} {
+		if present {
+			configured++
+		}
 	}
-	if dbPath == "" && postgresEnv == "" {
+	if configured > 1 {
+		return nil, "", errors.New("--db, --postgres-dsn-env, and --snowflake-broker-url are mutually exclusive")
+	}
+	if configured == 0 {
+		if strings.TrimSpace(flags.snowflakeBrokerTokenEnv) != "" {
+			return nil, "", errors.New("--snowflake-broker-token-env requires --snowflake-broker-url")
+		}
 		return nil, "", nil
 	}
-	if strings.TrimSpace(cfg.APIKey) == "" {
+	if strings.TrimSpace(cfg.APIKey) == "" && snowflakeURL == "" {
 		return nil, "", errors.New("SQL data sources require an API key (the policy check runs via ModelRelay /sql/validate)")
 	}
 	name := strings.TrimSpace(flags.dbName)
@@ -597,6 +628,26 @@ func buildLocalSQLDataSource(flags *rlmFlags, cfg runtimeConfig, server localRLM
 			Name:        name,
 			BrokerURL:   server.BrokerURL,
 			BrokerToken: server.Token,
+		}}, name, nil
+	}
+	if snowflakeURL != "" {
+		if strings.TrimSpace(flags.sqlProfile) != "" {
+			return nil, "", errors.New("--sql-profile cannot be used with --snowflake-broker-url; the trusted broker owns the policy")
+		}
+		parsed, err := url.Parse(snowflakeURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || parsed.RawQuery != "" || parsed.Path != "/v1/sql" {
+			return nil, "", errors.New("--snowflake-broker-url must be an HTTP(S) /v1/sql URL without userinfo, query, or fragment")
+		}
+		tokenEnv := strings.TrimSpace(flags.snowflakeBrokerTokenEnv)
+		if tokenEnv == "" {
+			return nil, "", errors.New("--snowflake-broker-url requires --snowflake-broker-token-env")
+		}
+		token, err := requiredSecretEnvironment(tokenEnv)
+		if err != nil {
+			return nil, "", err
+		}
+		return []rlmrunner.DataSourceSpec{{
+			Type: "sql", Name: name, BrokerURL: snowflakeURL, BrokerToken: token,
 		}}, name, nil
 	}
 	absPath, err := filepath.Abs(dbPath)
@@ -623,6 +674,17 @@ func buildLocalSQLDataSource(flags *rlmFlags, cfg runtimeConfig, server localRLM
 		spec.Policy = defaultLocalSQLPolicy
 	}
 	return []rlmrunner.DataSourceSpec{spec}, name, nil
+}
+
+func brokerURLWithRunID(rawURL, runID string) (string, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("parse Snowflake broker URL: %w", err)
+	}
+	values := parsed.Query()
+	values.Set("run_id", runID)
+	parsed.RawQuery = values.Encode()
+	return parsed.String(), nil
 }
 
 func openLocalPostgresConnector(ctx context.Context, flags *rlmFlags, cfg runtimeConfig) (*postgressource.Connector, error) {
