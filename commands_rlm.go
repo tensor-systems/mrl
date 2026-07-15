@@ -316,6 +316,7 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 		SubcallMaxOutputTokens: flags.subcallMaxOutputTokens,
 		SubcallModel:           flags.subcallModel,
 		SubcallReasoningEffort: flags.subcallReasoningEffort,
+		SubcallConcurrency:     rlmrunner.DefaultSubcallConcurrency,
 		ExecTimeoutMS:          flags.execTimeoutMS,
 		MaxOutputChars:         defaultRLMMaxOutputChars,
 		Token:                  server.Token,
