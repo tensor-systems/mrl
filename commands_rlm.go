@@ -1458,10 +1458,18 @@ func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, apiKey sdk.APIKe
 	if strings.TrimSpace(lease.ExecutionID) == "" || strings.TrimSpace(lease.Credential) == "" {
 		return errors.New("RLM execution lease response is incomplete")
 	}
+	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
+	finalizeLease := func() error {
+		finalizeCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		return doRLMLeaseJSON(finalizeCtx, nil, baseURL, apiKey, http.MethodPost, "/rlm/executions/"+url.PathEscape(lease.ExecutionID)+"/finalize", struct{}{}, nil)
+	}
 	if lease.MaxSettledSpendCents != resolution.MaxSettledSpendCents {
+		if finalizeErr := finalizeLease(); finalizeErr != nil {
+			return fmt.Errorf("RLM execution spend ceiling changed after resolution; finalize mismatched lease: %w", finalizeErr)
+		}
 		return errors.New("RLM execution spend ceiling changed after resolution")
 	}
-	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
 	runnerRequest.Token = lease.Credential
 	runnerRequest.RootEndpoint = baseURL + lease.RootCallbackPath
 	runnerRequest.SubcallEndpoint = baseURL + lease.SubcallCallbackPath
@@ -1489,9 +1497,7 @@ func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, apiKey sdk.APIKe
 			RequestID: lease.ExecutionID, TimeoutMS: profile.Limits.TimeoutMS,
 		})
 	}()
-	finalizeCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	finalizeErr := doRLMLeaseJSON(finalizeCtx, nil, cfg.BaseURL, apiKey, http.MethodPost, "/rlm/executions/"+url.PathEscape(lease.ExecutionID)+"/finalize", struct{}{}, nil)
+	finalizeErr := finalizeLease()
 	if finalizeErr != nil {
 		if runErr != nil {
 			return fmt.Errorf("local Droste failed: %v; finalize execution lease: %w", runErr, finalizeErr)
