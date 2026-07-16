@@ -1375,6 +1375,22 @@ type rlmLeaseSampling struct {
 	Stop            []string `json:"stop,omitempty"`
 }
 
+// rlmPreflightCorrelationID identifies one local pre-lease operation. It is
+// deliberately distinct from the authoritative execution ID created later.
+type rlmPreflightCorrelationID string
+
+func newRLMPreflightCorrelationID() (rlmPreflightCorrelationID, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate RLM preflight correlation ID: %w", err)
+	}
+	return rlmPreflightCorrelationID(hex.EncodeToString(buf)), nil
+}
+
+func (id rlmPreflightCorrelationID) requestID() string {
+	return "preflight-" + string(id)
+}
+
 func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, apiKey sdk.APIKeyAuth, model, query string, plan rlm.ContextPlan, flags *rlmFlags) error {
 	var resolution rlmLeaseResolutionResponse
 	if err := doRLMLeaseJSON(ctx, nil, cfg.BaseURL, apiKey, http.MethodPost, "/rlm/executions/resolve", rlmLeaseResolutionRequest{
@@ -1442,6 +1458,10 @@ func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, apiKey sdk.APIKe
 	if err != nil {
 		return err
 	}
+	preflightCorrelationID, err := newRLMPreflightCorrelationID()
+	if err != nil {
+		return err
+	}
 	interpreter := rlm.NewLocalInterpreter(rlm.LocalInterpreterConfig{
 		PythonPath: flags.pythonPath,
 		Limits: rlm.InterpreterLimits{
@@ -1459,13 +1479,13 @@ func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, apiKey sdk.APIKe
 		return fmt.Errorf("resolve local Droste runtime: %w", err)
 	}
 	preflight, err := rlmrunner.PreflightCodeSession(ctx, session, runtimeDir, preflightRequest, rlmrunner.RunOptions{
-		RequestID: "lease-preflight", TimeoutMS: profile.Limits.TimeoutMS,
+		RequestID: preflightCorrelationID.requestID(), TimeoutMS: profile.Limits.TimeoutMS,
 	})
 	if err != nil {
-		return fmt.Errorf("preflight local Droste: %w", err)
+		return fmt.Errorf("preflight local Droste (correlation_id=%s): %w", preflightCorrelationID, err)
 	}
 	if preflight.Preflight == nil {
-		return errors.New("local Droste preflight returned no scaffold manifest")
+		return fmt.Errorf("local Droste preflight returned no scaffold manifest (correlation_id=%s)", preflightCorrelationID)
 	}
 	var lease rlmLeaseCreateResponse
 	if err := doRLMLeaseJSON(ctx, nil, cfg.BaseURL, apiKey, http.MethodPost, "/rlm/executions", rlmLeaseCreateRequest{
