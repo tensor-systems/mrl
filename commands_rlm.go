@@ -59,6 +59,7 @@ func newRLMCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&flags.systemOverride, "system-override", false, "Replace the entire system prompt instead of prepending")
 	cmd.Flags().StringVar(&flags.toolChoice, "tool-choice", "", "Tool choice mode (unsupported for rlm-core)")
 	cmd.Flags().BoolVar(&flags.remote, "remote", false, "Run RLM on ModelRelay (/rlm/execute) instead of local Python")
+	cmd.Flags().BoolVar(&flags.stream, "stream", false, "Stream hosted RLM events as canonical NDJSON (requires --remote)")
 	cmd.Flags().BoolVar(&flags.relaySession, "relay-session", false, "Run local Droste with a durable ModelRelay execution lease")
 	cmd.Flags().StringVar(&flags.db, "db", "", "SQLite database file to expose as a read-only SQL data source")
 	cmd.Flags().StringVar(&flags.postgresDSNEnv, "postgres-dsn-env", "", "Environment variable containing a PostgreSQL DSN for a trusted read-only edge connector")
@@ -93,6 +94,7 @@ type rlmFlags struct {
 	inlineTextMaxBytes      int64
 	toolChoice              string
 	remote                  bool
+	stream                  bool
 	relaySession            bool
 	db                      string
 	postgresDSNEnv          string
@@ -153,6 +155,9 @@ func (u *rlmUsage) snapshot() workflow.TokenUsage {
 func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 	cfg, err := runtimeConfigFrom(cmd)
 	if err != nil {
+		return err
+	}
+	if err = validateRLMStreamMode(cfg, flags); err != nil {
 		return err
 	}
 
@@ -1631,6 +1636,10 @@ func runRLMRemote(ctx context.Context, cfg runtimeConfig, apiKey sdk.APIKeyAuth,
 		SubcallModel:           flags.subcallModel,
 		SubcallReasoningEffort: flags.subcallReasoningEffort,
 	}
+	if flags.stream {
+		return executeRLMRemoteStream(ctx, nil, cfg.BaseURL, apiKey, req, os.Stdout)
+	}
+
 	result, err := executeRLMRemote(ctx, nil, cfg.BaseURL, apiKey, req)
 	if err != nil {
 		return err
