@@ -263,30 +263,6 @@ hosted status-only progress is not replay content.
 
 The CLI builds a JSON context from attached files and exposes it as `context` in Python. Small text files are also loaded into `context["files"][i]["text"]` for easier scanning.
 
-### Run an agent
-
-```bash
-mrl agent run researcher --input "Analyze Q4 sales"
-```
-
-### Test an agent with mocked tools
-
-```bash
-mrl agent test researcher \
-  --input "Analyze Q4 sales" \
-  --mock-tools ./mocks.json \
-  --trace
-```
-
-### JSON input file
-
-```bash
-mrl agent test researcher \
-  --input-file ./inputs.json \
-  --output ./trace.json \
-  --json
-```
-
 ### Run a local agentic tool loop
 
 Enable the local `bash` tool (deny-by-default) and run a loop:
