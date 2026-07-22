@@ -26,7 +26,6 @@ import (
 	"github.com/modelrelay/modelrelay/platform/rlmprofile"
 	"github.com/modelrelay/modelrelay/platform/rlmrun"
 	"github.com/modelrelay/modelrelay/platform/rlmrunner"
-	"github.com/modelrelay/modelrelay/platform/workflow"
 	sdk "github.com/modelrelay/modelrelay/sdk/go"
 	generated "github.com/modelrelay/modelrelay/sdk/go/generated"
 	"github.com/modelrelay/modelrelay/sdk/go/llm"
@@ -139,7 +138,7 @@ const (
 
 type rlmUsage struct {
 	mu    sync.Mutex
-	usage workflow.TokenUsage
+	usage rlmrun.TokenUsageV1
 }
 
 func (u *rlmUsage) add(usage sdk.Usage) {
@@ -152,7 +151,7 @@ func (u *rlmUsage) add(usage sdk.Usage) {
 	u.usage.CacheWriteInputTokens += usage.CacheWriteInputTokens
 }
 
-func (u *rlmUsage) snapshot() workflow.TokenUsage {
+func (u *rlmUsage) snapshot() rlmrun.TokenUsageV1 {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return u.usage
@@ -506,8 +505,8 @@ type rlmJSONResult struct {
 	Iterations         int                                      `json:"iterations"`
 	Subcalls           int                                      `json:"subcalls"`
 	DataSourceRequests *int                                     `json:"data_source_requests,omitempty"`
-	TotalUsage         workflow.TokenUsage                      `json:"total_usage,omitempty"`
-	Trajectory         workflow.RLMContentFact                  `json:"trajectory"`
+	TotalUsage         rlmrun.TokenUsageV1                      `json:"total_usage,omitempty"`
+	Trajectory         rlmrun.RLMContentFact                    `json:"trajectory"`
 	Ready              bool                                     `json:"ready"`
 	Extracted          bool                                     `json:"extracted,omitempty"`
 	Error              *rlmJSONError                            `json:"error,omitempty"`
@@ -521,7 +520,7 @@ func buildRLMJSONResult(usage *rlmUsage, resp rlmrunner.RunnerResponse, runErr e
 	if err != nil {
 		return rlmJSONResult{}, err
 	}
-	totalUsage := workflow.TokenUsage{}
+	totalUsage := rlmrun.TokenUsageV1{}
 	if usage != nil {
 		totalUsage = usage.snapshot()
 	}
@@ -531,7 +530,7 @@ func buildRLMJSONResult(usage *rlmUsage, resp rlmrunner.RunnerResponse, runErr e
 		Subcalls:           resp.Subcalls,
 		DataSourceRequests: resp.DataSourceRequests,
 		TotalUsage:         totalUsage,
-		Trajectory:         workflow.UnavailableRLMContent("default_no_content_retention"),
+		Trajectory:         rlmrun.UnavailableRLMContent("default_no_content_retention"),
 		Ready:              resp.Ready,
 		Extracted:          resp.Extracted,
 	}
