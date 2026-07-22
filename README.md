@@ -1,6 +1,6 @@
 # ModelRelay CLI (mrl)
 
-A lightweight CLI for chatting with AI models, running agents, and managing ModelRelay resources.
+A lightweight CLI for chatting with AI models, running RLM sessions, and managing ModelRelay resources.
 
 📖 **[Full documentation](https://docs.modelrelay.ai/sdks/cli)**
 
@@ -262,76 +262,6 @@ policy. Local stderr is diagnostic output and is not interpreted as progress;
 hosted status-only progress is not replay content.
 
 The CLI builds a JSON context from attached files and exposes it as `context` in Python. Small text files are also loaded into `context["files"][i]["text"]` for easier scanning.
-
-### Run a local agentic tool loop
-
-Enable the local `bash` tool (deny-by-default) and run a loop:
-
-```bash
-mrl agent loop \
-  --model claude-sonnet-5 \
-  --tool bash \
-  --bash-allow "git " \
-  --input "List recent commits and summarize them"
-```
-
-Include `tasks_write` for progress tracking (state handle optional):
-
-```bash
-mrl agent loop \
-  --model claude-sonnet-5 \
-  --tool bash \
-  --tool tasks_write \
-  --state-ttl-sec 86400 \
-  --tasks-output ./tasks.json \
-  --input "Audit this repo and track your progress"
-```
-
-Enable local filesystem tools (`fs.*`):
-
-```bash
-mrl agent loop \
-  --model claude-sonnet-5 \
-  --tool fs \
-  --input "Search for TODOs in this repo"
-```
-
-### Tool manifest (TOML/JSON)
-
-You can load tools from a manifest file. The format is chosen by file extension (`.toml` or `.json`). CLI flags override manifest values.
-
-`tools.toml`:
-
-```toml
-tool_root = "."
-tools = ["bash", "tasks_write"]
-state_ttl_sec = 86400
-
-[bash]
-allow = ["git ", "rg "]
-timeout = "15s"
-max_output_bytes = 64000
-
-[tasks_write]
-output = "tasks.json"
-print = true
-
-[fs]
-ignore_dirs = ["node_modules", ".git"]
-search_timeout = "3s"
-
-[[custom]]
-name = "custom.echo"
-description = "Echo input as JSON"
-command = ["cat"]
-schema = { type = "object", properties = { message = { type = "string" } }, required = ["message"] }
-```
-
-Run with:
-
-```bash
-mrl agent loop --model claude-sonnet-5 --tools-file ./tools.toml --input "Audit this repo"
-```
 
 ### List models
 

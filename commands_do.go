@@ -13,6 +13,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+type bashToolArgs struct {
+	Command string `json:"command" description:"Shell command to execute"`
+}
+
 func newDoCmd() *cobra.Command {
 	var model string
 	var system string

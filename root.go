@@ -76,7 +76,6 @@ Examples:
 		newCustomerCmd(),
 		newUsageCmd(),
 		newTierCmd(),
-		newAgentCmd(),
 		newModelCmd(),
 		newResponseCmd(),
 		newSchemaCmd(),
