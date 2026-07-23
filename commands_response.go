@@ -94,14 +94,21 @@ func printResponseResolution(response generated.ResponseResolveResponse) {
 		{Key: "pricing_model", Value: stringOrEmpty(pricing.Model)},
 		{Key: "pricing_provider", Value: stringOrEmpty(pricing.Provider)},
 	}
-	if pricing.InputCostPerMillionCents != nil {
-		pairs = append(pairs, kvPair{Key: "input_cost_per_million_cents", Value: fmt.Sprint(*pricing.InputCostPerMillionCents)})
+	if pricing.Card != nil {
+		pairs = append(pairs,
+			kvPair{Key: "rate_card_revision", Value: pricing.Card.Revision},
+			kvPair{Key: "rate_card_processing_class", Value: string(pricing.Card.ProcessingClass)},
+			kvPair{Key: "rate_card_content_hash", Value: pricing.Card.ContentHash},
+		)
 	}
-	if pricing.OutputCostPerMillionCents != nil {
-		pairs = append(pairs, kvPair{Key: "output_cost_per_million_cents", Value: fmt.Sprint(*pricing.OutputCostPerMillionCents)})
+	if pricing.RateBasisKind != nil {
+		pairs = append(pairs, kvPair{Key: "rate_basis_kind", Value: string(*pricing.RateBasisKind)})
 	}
-	if pricing.PlatformFeePercent != nil {
-		pairs = append(pairs, kvPair{Key: "platform_fee_percent", Value: fmt.Sprint(*pricing.PlatformFeePercent)})
+	if pricing.RateBasisReason != nil {
+		pairs = append(pairs, kvPair{Key: "rate_basis_reason", Value: string(*pricing.RateBasisReason)})
+	}
+	if pricing.PlatformFeeRatePpm != nil {
+		pairs = append(pairs, kvPair{Key: "platform_fee_rate_ppm", Value: fmt.Sprint(*pricing.PlatformFeeRatePpm)})
 	}
 	printKeyValueTable(pairs)
 }
