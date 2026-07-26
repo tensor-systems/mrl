@@ -59,7 +59,7 @@ func newRLMCmd() *cobra.Command {
 	cmd.Flags().StringVar(&flags.system, "system", "", "Custom instructions prepended to the default RLM system prompt")
 	cmd.Flags().BoolVar(&flags.systemOverride, "system-override", false, "Replace the entire system prompt instead of prepending")
 	cmd.Flags().StringVar(&flags.toolChoice, "tool-choice", "", "Tool choice mode (unsupported for rlm-core)")
-	cmd.Flags().BoolVar(&flags.relaySession, "relay-session", false, "Run local Droste with a durable ModelRelay execution lease")
+	cmd.Flags().BoolVar(&flags.relaySession, "relay-session", false, "Run local Droste with a durable ModelRelay execution grant")
 	cmd.Flags().StringVar(&flags.customer, "customer", "", "External customer ID for --relay-session with a project API key")
 	cmd.Flags().StringVar(&flags.db, "db", "", "SQLite database file to expose as a read-only SQL data source")
 	cmd.Flags().StringVar(&flags.postgresDSNEnv, "postgres-dsn-env", "", "Environment variable containing a PostgreSQL DSN for a trusted read-only edge connector")
@@ -198,7 +198,7 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 
 	var (
 		client         *sdk.Client
-		relayAuthority rlmLeaseAuthority
+		relayAuthority grantAuthority
 	)
 	if !flags.relaySession {
 		client, err = newPromptClient(cfg)
@@ -207,7 +207,7 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 		}
 	}
 	if flags.relaySession {
-		relayAuthority, err = newRLMLeaseAuthority(cfg, flags.customer)
+		relayAuthority, err = newGrantAuthority(cfg, flags.customer)
 		if err != nil {
 			return err
 		}
@@ -1356,18 +1356,18 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	}
 }
 
-type rlmLeaseResolutionRequest struct {
+type grantResolutionRequest struct {
 	Model string `json:"model"`
 	Seed  *int64 `json:"seed"`
 }
 
-type rlmLeaseResolutionResponse struct {
+type grantResolutionResponse struct {
 	Profile                   rlmprofile.ResolvedExecution `json:"profile"`
 	RootArtifact              *rlmprofile.RootArtifact     `json:"root_artifact,omitempty"`
 	MaxSettledSpendMicrocents int64                        `json:"max_settled_spend_microcents"`
 }
 
-type rlmLeaseCreateRequest struct {
+type grantCreateRequest struct {
 	Model                        string                            `json:"model"`
 	Seed                         *int64                            `json:"seed"`
 	ScaffoldManifest             rlmprofile.DrosteScaffoldManifest `json:"scaffold_manifest"`
@@ -1376,21 +1376,21 @@ type rlmLeaseCreateRequest struct {
 	ExpectedEffectiveFingerprint rlmprofile.Digest                 `json:"expected_effective_fingerprint"`
 }
 
-type rlmLeaseCreateResponse struct {
-	ExecutionID               string    `json:"execution_id"`
+type grantCreateResponse struct {
+	GrantID                   string    `json:"grant_id"`
 	Credential                string    `json:"credential"`
 	ExecutionDeadline         time.Time `json:"execution_deadline"`
 	MaxSettledSpendMicrocents int64     `json:"max_settled_spend_microcents"`
 }
 
-type rlmLeaseSampling struct {
+type grantSampling struct {
 	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
 	MaxOutputTokens int64    `json:"max_output_tokens"`
 	Temperature     *float64 `json:"temperature,omitempty"`
 	Stop            []string `json:"stop,omitempty"`
 }
 
-// rlmPreflightCorrelationID identifies one local pre-lease operation. It is
+// rlmPreflightCorrelationID identifies one local pre-grant operation. It is
 // deliberately distinct from the authoritative execution ID created later.
 type rlmPreflightCorrelationID string
 
@@ -1406,27 +1406,27 @@ func (id rlmPreflightCorrelationID) requestID() string {
 	return "preflight-" + string(id)
 }
 
-type rlmLeaseAuthority struct {
+type grantAuthority struct {
 	apiKey             sdk.APIKeyAuth
 	customerExternalID string
 }
 
-func newRLMLeaseAuthority(cfg runtimeConfig, customerExternalID string) (rlmLeaseAuthority, error) {
+func newGrantAuthority(cfg runtimeConfig, customerExternalID string) (grantAuthority, error) {
 	if strings.TrimSpace(cfg.APIKey) == "" {
-		return rlmLeaseAuthority{}, errors.New("project API key required for --relay-session")
+		return grantAuthority{}, errors.New("project API key required for --relay-session")
 	}
 	customerExternalID = strings.TrimSpace(customerExternalID)
 	if customerExternalID == "" {
-		return rlmLeaseAuthority{}, errors.New("--customer is required for --relay-session with a project API key")
+		return grantAuthority{}, errors.New("--customer is required for --relay-session with a project API key")
 	}
 	key, err := sdk.ParseAPIKeyAuth(cfg.APIKey)
 	if err != nil {
-		return rlmLeaseAuthority{}, err
+		return grantAuthority{}, err
 	}
-	return rlmLeaseAuthority{apiKey: key, customerExternalID: customerExternalID}, nil
+	return grantAuthority{apiKey: key, customerExternalID: customerExternalID}, nil
 }
 
-func applyRLMLeaseAuthority(req *http.Request, authority rlmLeaseAuthority) error {
+func applyRLMLeaseAuthority(req *http.Request, authority grantAuthority) error {
 	if authority.apiKey == nil || strings.TrimSpace(authority.apiKey.String()) == "" {
 		return errors.New("invalid relay-session authentication")
 	}
@@ -1438,12 +1438,12 @@ func applyRLMLeaseAuthority(req *http.Request, authority rlmLeaseAuthority) erro
 	return nil
 }
 
-func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, authority rlmLeaseAuthority, model, query string, plan rlm.ContextPlan, flags *rlmFlags) error {
-	var resolution rlmLeaseResolutionResponse
-	if err := doRLMLeaseJSON(ctx, nil, cfg.BaseURL, authority, http.MethodPost, "/rlm/executions/resolve", rlmLeaseResolutionRequest{
+func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, authority grantAuthority, model, query string, plan rlm.ContextPlan, flags *rlmFlags) error {
+	var resolution grantResolutionResponse
+	if err := doGrantJSON(ctx, nil, cfg.BaseURL, authority, http.MethodPost, "/grants/resolve", grantResolutionRequest{
 		Model: model, Seed: flags.seed,
 	}, &resolution); err != nil {
-		return fmt.Errorf("resolve RLM execution lease: %w", err)
+		return fmt.Errorf("resolve RLM execution grant: %w", err)
 	}
 	profile := resolution.Profile
 	if resolution.MaxSettledSpendMicrocents <= 0 {
@@ -1460,13 +1460,13 @@ func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, authority rlmLea
 	if err != nil {
 		return err
 	}
-	rootSampling, err := json.Marshal(rlmLeaseSampling{
+	rootSampling, err := json.Marshal(grantSampling{
 		ReasoningEffort: profile.Root.ReasoningEffort, MaxOutputTokens: profile.Root.MaxOutputTokens,
 	})
 	if err != nil {
 		return err
 	}
-	subcallSampling, err := json.Marshal(rlmLeaseSampling{
+	subcallSampling, err := json.Marshal(grantSampling{
 		ReasoningEffort: profile.Subcall.ReasoningEffort, MaxOutputTokens: profile.Subcall.MaxOutputTokens,
 	})
 	if err != nil {
@@ -1534,28 +1534,28 @@ func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, authority rlmLea
 	if preflight.Preflight == nil {
 		return fmt.Errorf("local Droste preflight returned no scaffold manifest (correlation_id=%s)", preflightCorrelationID)
 	}
-	var lease rlmLeaseCreateResponse
-	if err := doRLMLeaseJSON(ctx, nil, cfg.BaseURL, authority, http.MethodPost, "/rlm/executions", rlmLeaseCreateRequest{
+	var issued grantCreateResponse
+	if err := doGrantJSON(ctx, nil, cfg.BaseURL, authority, http.MethodPost, "/grants", grantCreateRequest{
 		Model: model, Seed: flags.seed, ScaffoldManifest: preflight.Preflight.ScaffoldManifest,
 		ExpectedRevisionID:           profile.RevisionID,
 		ExpectedRevisionContentHash:  profile.RevisionContentHash,
 		ExpectedEffectiveFingerprint: profile.EffectiveFingerprint,
-	}, &lease); err != nil {
-		return fmt.Errorf("create RLM execution lease: %w", err)
+	}, &issued); err != nil {
+		return fmt.Errorf("create RLM execution grant: %w", err)
 	}
-	if strings.TrimSpace(lease.ExecutionID) == "" || strings.TrimSpace(lease.Credential) == "" {
-		return errors.New("RLM execution lease response is incomplete")
+	if strings.TrimSpace(issued.GrantID) == "" || strings.TrimSpace(issued.Credential) == "" {
+		return errors.New("RLM execution grant response is incomplete")
 	}
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
 	var executionEvidence generated.RLMRetrievedExecutionEvidence
-	finalizeLease := func() error {
+	finalizeGrant := func() error {
 		finalizeCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		return doRLMLeaseJSON(finalizeCtx, nil, baseURL, authority, http.MethodPost, "/rlm/executions/"+url.PathEscape(lease.ExecutionID)+"/finalize", struct{}{}, &executionEvidence)
+		return doGrantJSON(finalizeCtx, nil, baseURL, authority, http.MethodPost, "/grants/"+url.PathEscape(issued.GrantID)+"/finalize", struct{}{}, &executionEvidence)
 	}
-	if lease.MaxSettledSpendMicrocents != resolution.MaxSettledSpendMicrocents {
-		if finalizeErr := finalizeLease(); finalizeErr != nil {
-			return fmt.Errorf("RLM execution spend ceiling changed after resolution; finalize mismatched lease: %w", finalizeErr)
+	if issued.MaxSettledSpendMicrocents != resolution.MaxSettledSpendMicrocents {
+		if finalizeErr := finalizeGrant(); finalizeErr != nil {
+			return fmt.Errorf("RLM execution spend ceiling changed after resolution; finalize mismatched issued: %w", finalizeErr)
 		}
 		return errors.New("RLM execution spend ceiling changed after resolution")
 	}
@@ -1569,11 +1569,11 @@ func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, authority rlmLea
 	// relay-session rejects the --subcall-* flags outright, and the grant
 	// authorizes exactly the profile's routes, so a flag default here would be
 	// refused as unauthorized.
-	grantClient, clientErr := sdk.NewClientWithToken(lease.Credential,
+	grantClient, clientErr := sdk.NewClientWithToken(issued.Credential,
 		sdk.WithBaseURL(cfg.BaseURL), sdk.WithRequestTimeout(cfg.Timeout))
 	if clientErr != nil {
-		if finalizeErr := finalizeLease(); finalizeErr != nil {
-			return fmt.Errorf("build grant client: %v; finalize execution lease: %w", clientErr, finalizeErr)
+		if finalizeErr := finalizeGrant(); finalizeErr != nil {
+			return fmt.Errorf("build grant client: %v; finalize execution grant: %w", clientErr, finalizeErr)
 		}
 		return fmt.Errorf("build grant client: %w", clientErr)
 	}
@@ -1588,8 +1588,8 @@ func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, authority rlmLea
 		localRootDefaults{ReasoningEffort: profile.Root.ReasoningEffort},
 		nil, nil)
 	if proxyErr != nil {
-		if finalizeErr := finalizeLease(); finalizeErr != nil {
-			return fmt.Errorf("start grant proxy: %v; finalize execution lease: %w", proxyErr, finalizeErr)
+		if finalizeErr := finalizeGrant(); finalizeErr != nil {
+			return fmt.Errorf("start grant proxy: %v; finalize execution grant: %w", proxyErr, finalizeErr)
 		}
 		return fmt.Errorf("start grant proxy: %w", proxyErr)
 	}
@@ -1597,18 +1597,18 @@ func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, authority rlmLea
 	runnerRequest.Token = proxy.Token
 	runnerRequest.RootEndpoint = proxy.RootEndpoint
 	runnerRequest.SubcallEndpoint = proxy.SubcallEndpoint
-	runnerRequest.Session = lease.ExecutionID
+	runnerRequest.Session = issued.GrantID
 	runnerRequest.SessionIndex = 1
-	fmt.Fprintf(os.Stderr, "rlm: execution lease %s (maximum settled spend: %d microcents)\n", lease.ExecutionID, lease.MaxSettledSpendMicrocents)
+	fmt.Fprintf(os.Stderr, "rlm: execution grant %s (maximum settled spend: %d microcents)\n", issued.GrantID, issued.MaxSettledSpendMicrocents)
 	runResult, runErr := rlmrunner.RunCodeSession(ctx, session, runtimeDir, runnerRequest, rlmrunner.RunOptions{
-		RequestID: lease.ExecutionID, TimeoutMS: profile.Limits.TimeoutMS,
+		RequestID: issued.GrantID, TimeoutMS: profile.Limits.TimeoutMS,
 	})
-	finalizeErr := finalizeLease()
+	finalizeErr := finalizeGrant()
 	if finalizeErr != nil {
 		if runErr != nil {
-			return fmt.Errorf("local Droste failed: %v; finalize execution lease: %w", runErr, finalizeErr)
+			return fmt.Errorf("local Droste failed: %v; finalize execution grant: %w", runErr, finalizeErr)
 		}
-		return fmt.Errorf("finalize RLM execution lease: %w", finalizeErr)
+		return fmt.Errorf("finalize RLM execution grant: %w", finalizeErr)
 	}
 	if runErr != nil {
 		return writeRLMLocalOutcomeWithEvidenceTo(os.Stdout, cfg, nil, runResult.Response, runErr, &executionEvidence)
@@ -1616,7 +1616,7 @@ func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, authority rlmLea
 	return writeRLMLocalOutcomeWithEvidenceTo(os.Stdout, cfg, nil, runResult.Response, nil, &executionEvidence)
 }
 
-func doRLMLeaseJSON(ctx context.Context, httpClient *http.Client, baseURL string, authority rlmLeaseAuthority, method, path string, requestBody, responseBody any) error {
+func doGrantJSON(ctx context.Context, httpClient *http.Client, baseURL string, authority grantAuthority, method, path string, requestBody, responseBody any) error {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
 		return errors.New("base URL is required")

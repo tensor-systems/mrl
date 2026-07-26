@@ -48,22 +48,22 @@ fi
 			t.Errorf("%s customer scope = %q, want customer-123", request.URL.Path, got)
 		}
 		switch request.URL.Path {
-		case "/rlm/executions/resolve":
-			writeRelaySessionJSON(t, w, rlmLeaseResolutionResponse{
+		case "/grants/resolve":
+			writeRelaySessionJSON(t, w, grantResolutionResponse{
 				Profile:                   testRelaySessionProfile(),
 				MaxSettledSpendMicrocents: 100,
 			})
-		case "/rlm/executions":
+		case "/grants":
 			createCalls++
 			workingDirectories := readNonEmptyLines(t, logPath)
 			if len(workingDirectories) != 1 {
-				t.Errorf("lease created after %d local operations, want exactly one successful preflight", len(workingDirectories))
+				t.Errorf("grant created after %d local operations, want exactly one successful preflight", len(workingDirectories))
 			}
-			writeRelaySessionJSON(t, w, rlmLeaseCreateResponse{
-				ExecutionID: "execution-1", Credential: "lease-token",
+			writeRelaySessionJSON(t, w, grantCreateResponse{
+				GrantID: "execution-1", Credential: "grant-token",
 				MaxSettledSpendMicrocents: 100,
 			})
-		case "/rlm/executions/execution-1/finalize":
+		case "/grants/execution-1/finalize":
 			writeRelaySessionJSON(t, w, map[string]any{})
 		default:
 			http.Error(w, "unexpected path", http.StatusNotFound)
@@ -91,9 +91,9 @@ fi
 		t.Fatalf("caller-owned session directory still exists after return: %v", statErr)
 	}
 	if createCalls != 1 {
-		t.Fatalf("lease create calls = %d, want 1", createCalls)
+		t.Fatalf("grant create calls = %d, want 1", createCalls)
 	}
-	wantPaths := []string{"/rlm/executions/resolve", "/rlm/executions", "/rlm/executions/execution-1/finalize"}
+	wantPaths := []string{"/grants/resolve", "/grants", "/grants/execution-1/finalize"}
 	if strings.Join(requestPath, "\n") != strings.Join(wantPaths, "\n") {
 		t.Fatalf("request paths = %v, want %v", requestPath, wantPaths)
 	}
@@ -117,13 +117,13 @@ exit 1
 		mu.Lock()
 		defer mu.Unlock()
 		requestPath = append(requestPath, request.URL.Path)
-		if request.URL.Path == "/rlm/executions/resolve" {
-			writeRelaySessionJSON(t, w, rlmLeaseResolutionResponse{
+		if request.URL.Path == "/grants/resolve" {
+			writeRelaySessionJSON(t, w, grantResolutionResponse{
 				Profile: testRelaySessionProfile(), MaxSettledSpendMicrocents: 100,
 			})
 			return
 		}
-		if request.URL.Path == "/rlm/executions" {
+		if request.URL.Path == "/grants" {
 			createCalls++
 		}
 		http.Error(w, "unexpected request", http.StatusInternalServerError)
@@ -142,9 +142,9 @@ exit 1
 		t.Fatalf("error = %v, want bounded path-safe local correlation ID", err)
 	}
 	if createCalls != 0 {
-		t.Fatalf("lease create calls = %d, want 0", createCalls)
+		t.Fatalf("grant create calls = %d, want 0", createCalls)
 	}
-	if len(requestPath) != 1 || requestPath[0] != "/rlm/executions/resolve" {
+	if len(requestPath) != 1 || requestPath[0] != "/grants/resolve" {
 		t.Fatalf("request paths = %v, want resolution only", requestPath)
 	}
 	workingDirectories := readNonEmptyLines(t, logPath)
@@ -180,20 +180,20 @@ fi
 	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
-		case "/rlm/executions/resolve":
-			writeRelaySessionJSON(t, w, rlmLeaseResolutionResponse{
+		case "/grants/resolve":
+			writeRelaySessionJSON(t, w, grantResolutionResponse{
 				Profile: testRelaySessionProfile(), MaxSettledSpendMicrocents: 100,
 			})
-		case "/rlm/executions":
+		case "/grants":
 			mu.Lock()
 			nextExecutionID++
-			executionID := fmt.Sprintf("execution-%d", nextExecutionID)
+			grantID := fmt.Sprintf("execution-%d", nextExecutionID)
 			mu.Unlock()
-			writeRelaySessionJSON(t, w, rlmLeaseCreateResponse{
-				ExecutionID: executionID, Credential: "lease-token",
+			writeRelaySessionJSON(t, w, grantCreateResponse{
+				GrantID: grantID, Credential: "grant-token",
 				MaxSettledSpendMicrocents: 100,
 			})
-		case "/rlm/executions/execution-1/finalize", "/rlm/executions/execution-2/finalize":
+		case "/grants/execution-1/finalize", "/grants/execution-2/finalize":
 			writeRelaySessionJSON(t, w, map[string]any{})
 		default:
 			http.Error(w, "unexpected path", http.StatusNotFound)
@@ -237,8 +237,8 @@ fi
 	}
 }
 
-func rlmTestProjectAuthority(customerExternalID string) rlmLeaseAuthority {
-	return rlmLeaseAuthority{apiKey: sdk.SecretKey("mr_sk_test"), customerExternalID: customerExternalID}
+func rlmTestProjectAuthority(customerExternalID string) grantAuthority {
+	return grantAuthority{apiKey: sdk.SecretKey("mr_sk_test"), customerExternalID: customerExternalID}
 }
 
 func testRelaySessionProfile() rlmprofile.ResolvedExecution {
@@ -304,7 +304,7 @@ func TestDoRLMLeaseJSONUsesOneCustomerAuthority(t *testing.T) {
 		gotKey = r.Header.Get("X-ModelRelay-Api-Key")
 		gotClient = r.Header.Get("X-ModelRelay-Client")
 		gotCustomer = r.Header.Get("X-ModelRelay-Customer-Id")
-		var request rlmLeaseResolutionRequest
+		var request grantResolutionRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
@@ -320,10 +320,10 @@ func TestDoRLMLeaseJSONUsesOneCustomerAuthority(t *testing.T) {
 			Selector string `json:"selector"`
 		} `json:"profile"`
 	}
-	if err := doRLMLeaseJSON(t.Context(), server.Client(), server.URL, rlmTestProjectAuthority("customer-123"), http.MethodPost, "/rlm/executions/resolve", rlmLeaseResolutionRequest{Model: "preset:test"}, &response); err != nil {
-		t.Fatalf("doRLMLeaseJSON: %v", err)
+	if err := doGrantJSON(t.Context(), server.Client(), server.URL, rlmTestProjectAuthority("customer-123"), http.MethodPost, "/grants/resolve", grantResolutionRequest{Model: "preset:test"}, &response); err != nil {
+		t.Fatalf("doGrantJSON: %v", err)
 	}
-	if gotPath != "/rlm/executions/resolve" || gotKey != "mr_sk_test" || gotClient == "" || gotCustomer != "customer-123" {
+	if gotPath != "/grants/resolve" || gotKey != "mr_sk_test" || gotClient == "" || gotCustomer != "customer-123" {
 		t.Fatalf("request path/key/client/customer = %q/%q/%q/%q", gotPath, gotKey, gotClient, gotCustomer)
 	}
 	if response.Profile.Selector != "preset:test" {
@@ -346,7 +346,7 @@ func TestNewRLMLeaseAuthority_RequiresProjectKeyAndCustomerScope(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			authority, err := newRLMLeaseAuthority(tt.config, tt.customer)
+			authority, err := newGrantAuthority(tt.config, tt.customer)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error = %v, want %q", err, tt.wantErr)
@@ -354,7 +354,7 @@ func TestNewRLMLeaseAuthority_RequiresProjectKeyAndCustomerScope(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("newRLMLeaseAuthority: %v", err)
+				t.Fatalf("newGrantAuthority: %v", err)
 			}
 			if authority.apiKey == nil || authority.apiKey.String() != "mr_sk_test" {
 				t.Fatalf("api key = %v", authority.apiKey)
