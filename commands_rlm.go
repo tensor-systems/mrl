@@ -111,7 +111,7 @@ type rlmFlags struct {
 
 // Subcall cost defaults applied by the local subcall proxy when neither the
 // runner payload nor the flags provide a value; mirrors the hosted
-// /rlm/subcall defaults (rlm-core#25).
+// Subcall cost defaults (rlm-core#25).
 const (
 	localDefaultSubcallMaxOutputTokens = int64(2048)
 	localDefaultSubcallReasoningEffort = "none"
@@ -298,7 +298,7 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 		MaxOutputTokens: flags.subcallMaxOutputTokens,
 		Model:           flags.subcallModel,
 		ReasoningEffort: flags.subcallReasoningEffort,
-	}, newLocalPostgresBrokerConfig(flags, postgresConnector), mcpMounts.Secrets)
+	}, localRootDefaults{}, newLocalPostgresBrokerConfig(flags, postgresConnector), mcpMounts.Secrets)
 	if err != nil {
 		return err
 	}
@@ -555,8 +555,8 @@ func writeRLMLocalOutcomeWithEvidenceTo(w io.Writer, cfg runtimeConfig, usage *r
 	return err
 }
 
-func callLLM(ctx context.Context, client *sdk.Client, model string, input []llm.InputItem, maxOutputTokens int64, reasoningEffort string) (*sdk.Response, error) {
-	builder := client.Responses.New().Model(sdk.NewModelID(model)).Input(input)
+func callLLM(ctx context.Context, client *sdk.Client, model string, input []llm.InputItem, maxOutputTokens int64, reasoningEffort string, depth int) (*sdk.Response, error) {
+	builder := client.Responses.New().Model(sdk.NewModelID(model)).Input(input).Depth(depth)
 	if maxOutputTokens > 0 {
 		builder = builder.MaxOutputTokens(maxOutputTokens)
 	}
@@ -767,13 +767,27 @@ type localRLMServer struct {
 // localSubcallDefaults carries the --subcall-* flag values into the local
 // subcall proxy; per-payload values from the runner take precedence
 // (rlm-core#25).
+// localRootDefaults carries the resolved profile's root controls into the root
+// proxy. Only --relay-session sets it: the local path has no grant to satisfy
+// and leaves root controls to the runner.
+type localRootDefaults struct {
+	ReasoningEffort string
+}
+
 type localSubcallDefaults struct {
 	MaxOutputTokens int64
 	Model           string
 	ReasoningEffort string
+	// RouteIsAuthority suppresses these defaults entirely. Under a grant the
+	// authorized route supplies any control the runner omits, and it does so
+	// exactly -- so substituting a local default here states a control the
+	// grant did not authorize and the call is refused. An empty profile effort
+	// is the case that bites: it is a legal, distinct authorized value, and
+	// the local default would replace it with "none".
+	RouteIsAuthority bool
 }
 
-func startLocalRLMServer(ctx context.Context, client *sdk.Client, cfg runtimeConfig, defaultModel string, maxDepth, maxSubcalls int, usage *rlmUsage, subcallDefaults localSubcallDefaults, postgresBroker *localPostgresBrokerConfig, mcpSecrets map[localMCPSecretKey]string) (localRLMServer, error) {
+func startLocalRLMServer(ctx context.Context, client *sdk.Client, cfg runtimeConfig, defaultModel string, maxDepth, maxSubcalls int, usage *rlmUsage, subcallDefaults localSubcallDefaults, rootDefaults localRootDefaults, postgresBroker *localPostgresBrokerConfig, mcpSecrets map[localMCPSecretKey]string) (localRLMServer, error) {
 	if maxSubcalls < 0 {
 		return localRLMServer{}, errors.New("max_subcalls must be >= 0")
 	}
@@ -795,11 +809,12 @@ func startLocalRLMServer(ctx context.Context, client *sdk.Client, cfg runtimeCon
 		usage:           usage,
 	}
 	rootHandler := &localRootHandler{
-		ctx:          ctx,
-		client:       client,
-		defaultModel: defaultModel,
-		token:        token,
-		usage:        usage,
+		ctx:             ctx,
+		client:          client,
+		defaultModel:    defaultModel,
+		reasoningEffort: rootDefaults.ReasoningEffort,
+		token:           token,
+		usage:           usage,
 	}
 
 	mux := http.NewServeMux()
@@ -1111,10 +1126,11 @@ func (h *localSubcallHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Subcall cost controls (rlm-core#25): default to bounded output and no
-	// thinking, mirroring the hosted /rlm/subcall defaults. Precedence:
+	// thinking. Under --relay-session these come from the resolved profile,
+	// because the grant authorizes those exact controls. Precedence:
 	// per-payload value > --subcall-* flag > default.
 	maxOutputTokens := h.subcallDefaults.MaxOutputTokens
-	if maxOutputTokens <= 0 {
+	if maxOutputTokens <= 0 && !h.subcallDefaults.RouteIsAuthority {
 		maxOutputTokens = localDefaultSubcallMaxOutputTokens
 	}
 	if req.MaxOutputTokens != nil {
@@ -1125,7 +1141,7 @@ func (h *localSubcallHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		maxOutputTokens = *req.MaxOutputTokens
 	}
 	reasoningEffort := h.subcallDefaults.ReasoningEffort
-	if reasoningEffort == "" {
+	if reasoningEffort == "" && !h.subcallDefaults.RouteIsAuthority {
 		reasoningEffort = localDefaultSubcallReasoningEffort
 	}
 	if req.ReasoningEffort != nil {
@@ -1137,7 +1153,11 @@ func (h *localSubcallHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		reasoningEffort = effort
 	}
 
-	resp, err := callLLM(h.ctx, h.client, model, []llm.InputItem{llm.NewUserText(req.Prompt)}, maxOutputTokens, reasoningEffort)
+	// Depth is the runner's own fact and must reach the server. Under
+	// --relay-session it decides which of the grant's routes prices the call
+	// and whether it draws on the subcall budget; dropping it would bill every
+	// subcall at the root rate and leave the subcall budget untouched.
+	resp, err := callLLM(h.ctx, h.client, model, []llm.InputItem{llm.NewUserText(req.Prompt)}, maxOutputTokens, reasoningEffort, req.Depth)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -1189,11 +1209,12 @@ type localRootResponse struct {
 }
 
 type localRootHandler struct {
-	ctx          context.Context
-	client       *sdk.Client
-	defaultModel string
-	token        string
-	usage        *rlmUsage
+	ctx             context.Context
+	client          *sdk.Client
+	defaultModel    string
+	reasoningEffort string
+	token           string
+	usage           *rlmUsage
 }
 
 func (h *localRootHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -1237,6 +1258,9 @@ func (h *localRootHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	builder := h.client.Responses.New().Model(sdk.NewModelID(model)).Input(input)
+	if h.reasoningEffort != "" {
+		builder = builder.ReasoningEffort(h.reasoningEffort)
+	}
 	if provider := strings.TrimSpace(req.Provider); provider != "" {
 		builder = builder.Provider(sdk.NewProviderID(provider))
 	}
@@ -1356,8 +1380,6 @@ type rlmLeaseCreateResponse struct {
 	ExecutionID               string    `json:"execution_id"`
 	Credential                string    `json:"credential"`
 	ExecutionDeadline         time.Time `json:"execution_deadline"`
-	RootCallbackPath          string    `json:"root_callback_path"`
-	SubcallCallbackPath       string    `json:"subcall_callback_path"`
 	MaxSettledSpendMicrocents int64     `json:"max_settled_spend_microcents"`
 }
 
@@ -1537,9 +1559,44 @@ func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, authority rlmLea
 		}
 		return errors.New("RLM execution spend ceiling changed after resolution")
 	}
-	runnerRequest.Token = lease.Credential
-	runnerRequest.RootEndpoint = baseURL + lease.RootCallbackPath
-	runnerRequest.SubcallEndpoint = baseURL + lease.SubcallCallbackPath
+	// The runner speaks the callback envelope, and the callback endpoints are
+	// gone (#1896). It therefore talks to the same loopback proxy the local
+	// path uses, and the proxy makes ordinary /responses calls bearing the
+	// grant credential. That also keeps the credential in the trusted Go host
+	// instead of handing it to the Python subprocess.
+	//
+	// The proxy's controls come from the resolved profile, not from flags:
+	// relay-session rejects the --subcall-* flags outright, and the grant
+	// authorizes exactly the profile's routes, so a flag default here would be
+	// refused as unauthorized.
+	grantClient, clientErr := sdk.NewClientWithToken(lease.Credential,
+		sdk.WithBaseURL(cfg.BaseURL), sdk.WithRequestTimeout(cfg.Timeout))
+	if clientErr != nil {
+		if finalizeErr := finalizeLease(); finalizeErr != nil {
+			return fmt.Errorf("build grant client: %v; finalize execution lease: %w", clientErr, finalizeErr)
+		}
+		return fmt.Errorf("build grant client: %w", clientErr)
+	}
+	proxy, proxyErr := startLocalRLMServer(ctx, grantClient, cfg, profile.Root.Model.String(),
+		profile.Limits.MaxDepth, profile.Limits.MaxSubcalls, &rlmUsage{},
+		localSubcallDefaults{
+			MaxOutputTokens:  profile.Subcall.MaxOutputTokens,
+			Model:            profile.Subcall.Model.String(),
+			ReasoningEffort:  profile.Subcall.ReasoningEffort,
+			RouteIsAuthority: true,
+		},
+		localRootDefaults{ReasoningEffort: profile.Root.ReasoningEffort},
+		nil, nil)
+	if proxyErr != nil {
+		if finalizeErr := finalizeLease(); finalizeErr != nil {
+			return fmt.Errorf("start grant proxy: %v; finalize execution lease: %w", proxyErr, finalizeErr)
+		}
+		return fmt.Errorf("start grant proxy: %w", proxyErr)
+	}
+	defer proxy.Close()
+	runnerRequest.Token = proxy.Token
+	runnerRequest.RootEndpoint = proxy.RootEndpoint
+	runnerRequest.SubcallEndpoint = proxy.SubcallEndpoint
 	runnerRequest.Session = lease.ExecutionID
 	runnerRequest.SessionIndex = 1
 	fmt.Fprintf(os.Stderr, "rlm: execution lease %s (maximum settled spend: %d microcents)\n", lease.ExecutionID, lease.MaxSettledSpendMicrocents)

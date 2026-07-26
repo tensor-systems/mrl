@@ -61,7 +61,6 @@ fi
 			}
 			writeRelaySessionJSON(t, w, rlmLeaseCreateResponse{
 				ExecutionID: "execution-1", Credential: "lease-token",
-				RootCallbackPath: "/rlm/root", SubcallCallbackPath: "/rlm/subcall",
 				MaxSettledSpendMicrocents: 100,
 			})
 		case "/rlm/executions/execution-1/finalize":
@@ -192,7 +191,6 @@ fi
 			mu.Unlock()
 			writeRelaySessionJSON(t, w, rlmLeaseCreateResponse{
 				ExecutionID: executionID, Credential: "lease-token",
-				RootCallbackPath: "/rlm/root", SubcallCallbackPath: "/rlm/subcall",
 				MaxSettledSpendMicrocents: 100,
 			})
 		case "/rlm/executions/execution-1/finalize", "/rlm/executions/execution-2/finalize":

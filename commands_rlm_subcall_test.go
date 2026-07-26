@@ -191,3 +191,51 @@ func TestValidSubcallReasoningEffort_AcceptsFullLadderAndRejectsJunk(t *testing.
 		}
 	}
 }
+
+func TestLocalSubcallHandler_ForwardsRunnerDepth(t *testing.T) {
+	captured := &capturedResponsesServer{}
+	handler, cleanup := newSubcallTestHandler(t, captured, localSubcallDefaults{})
+	defer cleanup()
+
+	// Depth is the runner's own fact and the server cannot re-derive it. Under
+	// --relay-session it decides which of the grant's routes prices the call
+	// and whether it draws on the subcall budget, so dropping it here would
+	// bill every subcall at the root rate and leave the subcall budget
+	// untouched (#1896).
+	if rec := doLocalSubcall(t, handler, map[string]any{"prompt": "hello", "depth": 1}); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := captured.last(t)["depth"]; got != float64(1) {
+		t.Fatalf("forwarded depth = %v, want 1", got)
+	}
+
+	// Zero is the outermost call, and the wire omits it rather than stating a
+	// default: an ordinary credential authorizes no recursion to bound.
+	if rec := doLocalSubcall(t, handler, map[string]any{"prompt": "hello"}); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if _, present := captured.last(t)["depth"]; present {
+		t.Fatalf("depth was sent for an outermost call: %v", captured.last(t))
+	}
+}
+
+// Under a grant the authorized route is the authority on controls, and it
+// matches exactly. A profile whose subcall effort is empty authorizes the
+// empty-effort route -- substituting the local "none" default states a control
+// the grant never authorized, and every subcall is refused with 403.
+func TestLocalSubcallHandler_RouteIsAuthority_SubstitutesNoDefaults(t *testing.T) {
+	captured := &capturedResponsesServer{}
+	handler, cleanup := newSubcallTestHandler(t, captured, localSubcallDefaults{RouteIsAuthority: true})
+	defer cleanup()
+
+	if rec := doLocalSubcall(t, handler, map[string]any{"prompt": "hello"}); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := captured.last(t)
+	if _, present := body["reasoning_effort"]; present {
+		t.Fatalf("a local reasoning_effort default was stated under a grant: %v", body)
+	}
+	if _, present := body["max_output_tokens"]; present {
+		t.Fatalf("a local max_output_tokens default was stated under a grant: %v", body)
+	}
+}
