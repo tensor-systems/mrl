@@ -37,7 +37,7 @@ func newRLMCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "rlm <query>",
-		Short: "Run an RLM session (local Python by default; use --remote for hosted)",
+		Short: "Run an RLM session with the local Python engine",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRLM(cmd, args, &flags)
@@ -59,8 +59,6 @@ func newRLMCmd() *cobra.Command {
 	cmd.Flags().StringVar(&flags.system, "system", "", "Custom instructions prepended to the default RLM system prompt")
 	cmd.Flags().BoolVar(&flags.systemOverride, "system-override", false, "Replace the entire system prompt instead of prepending")
 	cmd.Flags().StringVar(&flags.toolChoice, "tool-choice", "", "Tool choice mode (unsupported for rlm-core)")
-	cmd.Flags().BoolVar(&flags.remote, "remote", false, "Run RLM on ModelRelay (/rlm/execute) instead of local Python")
-	cmd.Flags().BoolVar(&flags.stream, "stream", false, "Stream hosted RLM events as canonical NDJSON (requires --remote)")
 	cmd.Flags().BoolVar(&flags.relaySession, "relay-session", false, "Run local Droste with a durable ModelRelay execution lease")
 	cmd.Flags().StringVar(&flags.customer, "customer", "", "External customer ID for --relay-session with a project API key")
 	cmd.Flags().StringVar(&flags.db, "db", "", "SQLite database file to expose as a read-only SQL data source")
@@ -95,8 +93,6 @@ type rlmFlags struct {
 	maxTotalBytes           int64
 	inlineTextMaxBytes      int64
 	toolChoice              string
-	remote                  bool
-	stream                  bool
 	relaySession            bool
 	customer                string
 	db                      string
@@ -162,10 +158,6 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 	if err != nil {
 		return err
 	}
-	if err = validateRLMStreamMode(cfg, flags); err != nil {
-		return err
-	}
-
 	model := resolveModel(flags.model, cfg)
 	if model == "" {
 		return errors.New("model is required (set via --model, MODELRELAY_MODEL, or mrl config set --model)")
@@ -195,17 +187,8 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 		defer cleanup()
 	}
 
-	if flags.remote && flags.relaySession {
-		return errors.New("--remote and --relay-session are mutually exclusive")
-	}
 	if strings.TrimSpace(flags.customer) != "" && !flags.relaySession {
 		return errors.New("--customer requires --relay-session")
-	}
-	if flags.remote {
-		if validationErr := validateRLMRemoteAttachments(files); validationErr != nil {
-			return validationErr
-		}
-		files = stripRemoteAttachmentPaths(files)
 	}
 
 	contextPayload, err := mergeRLMContextFiles([]byte("null"), files)
@@ -215,18 +198,9 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 
 	var (
 		client         *sdk.Client
-		apiKey         sdk.APIKeyAuth
 		relayAuthority rlmLeaseAuthority
 	)
-	if flags.remote {
-		if strings.TrimSpace(cfg.APIKey) == "" {
-			return errors.New("api key required")
-		}
-		apiKey, err = sdk.ParseAPIKeyAuth(cfg.APIKey)
-		if err != nil {
-			return err
-		}
-	} else if !flags.relaySession {
+	if !flags.relaySession {
 		client, err = newPromptClient(cfg)
 		if err != nil {
 			return err
@@ -287,7 +261,7 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 	if err != nil {
 		return err
 	}
-	if plan.Mode == rlm.ContextLoadFile && !flags.remote {
+	if plan.Mode == rlm.ContextLoadFile {
 		if writeErr := os.WriteFile(plan.ContextPath, contextPayload, 0o600); writeErr != nil {
 			return writeErr
 		}
@@ -302,13 +276,6 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 			return errors.New("--relay-session currently supports message/context workloads only; SQL and MCP transports remain local-mode only")
 		}
 		return runRLMRelaySession(ctx, cfg, relayAuthority, model, strings.Join(args, " "), plan, flags)
-	}
-
-	if flags.remote {
-		if strings.TrimSpace(flags.db) != "" || strings.TrimSpace(flags.postgresDSNEnv) != "" || strings.TrimSpace(flags.snowflakeBrokerURL) != "" || len(flags.mcpConfigs) > 0 {
-			return errors.New("--db, --postgres-dsn-env, --snowflake-broker-url, and --mcp-config are local/VPC-mode only: trusted data-provider transports execute at the customer-controlled edge")
-		}
-		return runRLMRemote(ctx, cfg, apiKey, model, strings.Join(args, " "), contextPayload, plan, flags, len(files) > 0)
 	}
 
 	usage := &rlmUsage{}
@@ -1638,294 +1605,4 @@ func doRLMLeaseJSON(ctx context.Context, httpClient *http.Client, baseURL string
 		return fmt.Errorf("decode response: %w", err)
 	}
 	return nil
-}
-
-const rlmRemoteAttachmentNote = "Files in context include inline text only; do not attempt to open local file paths."
-
-type rlmExecuteRemoteRequest struct {
-	Model                  string          `json:"model"`
-	Query                  string          `json:"query"`
-	Context                json.RawMessage `json:"context,omitempty"`
-	ContextRef             string          `json:"context_ref,omitempty"`
-	SystemPrompt           string          `json:"system_prompt,omitempty"`
-	MaxDepth               *int            `json:"max_depth,omitempty"`
-	MaxSubcalls            *int            `json:"max_subcalls,omitempty"`
-	TimeoutMS              *int            `json:"timeout_ms,omitempty"`
-	Seed                   *int64          `json:"seed"`
-	SubcallMaxOutputTokens int64           `json:"subcall_max_output_tokens,omitempty"`
-	SubcallModel           string          `json:"subcall_model,omitempty"`
-	SubcallReasoningEffort string          `json:"subcall_reasoning_effort,omitempty"`
-}
-
-type rlmExecuteRemoteResult struct {
-	Raw      json.RawMessage
-	Answer   json.RawMessage
-	Progress []rlmrunner.ProgressEvent
-}
-
-type rlmContextCreateRequest struct {
-	Context json.RawMessage `json:"context"`
-}
-
-type rlmContextCreateResponse struct {
-	ID string `json:"id"`
-}
-
-func runRLMRemote(ctx context.Context, cfg runtimeConfig, apiKey sdk.APIKeyAuth, model string, query string, contextPayload json.RawMessage, plan rlm.ContextPlan, flags *rlmFlags, hasAttachments bool) error {
-	if flags.systemOverride {
-		return errors.New("system-override is not supported with --remote")
-	}
-	if flags.execTimeoutMS != 0 {
-		return errors.New("--exec-timeout-ms is local-mode only; hosted run wall time is owned by the resolved execution profile")
-	}
-
-	systemPrompt := strings.TrimSpace(flags.system)
-	if hasAttachments {
-		systemPrompt = appendSystemPrompt(systemPrompt, rlmRemoteAttachmentNote)
-	}
-
-	contextInline := json.RawMessage(nil)
-	contextRef := ""
-	switch plan.Mode {
-	case rlm.ContextLoadInline:
-		if !isJSONNull(contextPayload) {
-			contextInline = contextPayload
-		}
-	case rlm.ContextLoadFile:
-		ref, err := createRLMContextRemote(ctx, nil, cfg.BaseURL, apiKey, contextPayload)
-		if err != nil {
-			return err
-		}
-		contextRef = ref
-	}
-
-	maxDepth := flags.maxDepth
-	maxSubcalls := flags.maxSubcalls
-
-	req := rlmExecuteRemoteRequest{
-		Model:                  model,
-		Query:                  query,
-		Context:                contextInline,
-		ContextRef:             contextRef,
-		SystemPrompt:           systemPrompt,
-		MaxDepth:               &maxDepth,
-		MaxSubcalls:            &maxSubcalls,
-		Seed:                   flags.seed,
-		SubcallMaxOutputTokens: flags.subcallMaxOutputTokens,
-		SubcallModel:           flags.subcallModel,
-		SubcallReasoningEffort: flags.subcallReasoningEffort,
-	}
-	if flags.stream {
-		return executeRLMRemoteStream(ctx, nil, cfg.BaseURL, apiKey, req, os.Stdout)
-	}
-
-	result, err := executeRLMRemote(ctx, nil, cfg.BaseURL, apiKey, req)
-	if err != nil {
-		return err
-	}
-
-	if cfg.Output == outputFormatJSON {
-		return writeRawJSON(os.Stdout, result.Raw)
-	}
-
-	writeRLMProgress(os.Stderr, result.Progress)
-	return writeRLMAnswer(os.Stdout, result.Answer)
-}
-
-func executeRLMRemote(ctx context.Context, httpClient *http.Client, baseURL string, apiKey sdk.APIKeyAuth, req rlmExecuteRemoteRequest) (rlmExecuteRemoteResult, error) {
-	endpoint := strings.TrimRight(strings.TrimSpace(baseURL), "/") + "/rlm/execute"
-	if endpoint == "" {
-		return rlmExecuteRemoteResult{}, errors.New("base URL is required")
-	}
-	payload, err := json.Marshal(req)
-	if err != nil {
-		return rlmExecuteRemoteResult{}, fmt.Errorf("encode rlm execute request: %w", err)
-	}
-
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return rlmExecuteRemoteResult{}, fmt.Errorf("build rlm execute request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if apiKey != nil && strings.TrimSpace(apiKey.String()) != "" {
-		httpReq.Header.Set("X-ModelRelay-Api-Key", apiKey.String())
-	}
-	if header := strings.TrimSpace(clientHeader()); header != "" {
-		httpReq.Header.Set("X-ModelRelay-Client", header)
-	}
-
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		return rlmExecuteRemoteResult{}, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return rlmExecuteRemoteResult{}, fmt.Errorf("read rlm execute response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		msg := strings.TrimSpace(string(body))
-		if msg == "" {
-			msg = resp.Status
-		}
-		return rlmExecuteRemoteResult{}, fmt.Errorf("rlm execute failed (%d): %s", resp.StatusCode, msg)
-	}
-
-	var partial struct {
-		Answer   json.RawMessage           `json:"answer"`
-		Progress []rlmrunner.ProgressEvent `json:"progress,omitempty"`
-	}
-	if err := json.Unmarshal(body, &partial); err != nil {
-		return rlmExecuteRemoteResult{}, fmt.Errorf("decode rlm execute response: %w", err)
-	}
-
-	return rlmExecuteRemoteResult{
-		Raw:      body,
-		Answer:   partial.Answer,
-		Progress: partial.Progress,
-	}, nil
-}
-
-func createRLMContextRemote(ctx context.Context, httpClient *http.Client, baseURL string, apiKey sdk.APIKeyAuth, contextPayload json.RawMessage) (string, error) {
-	endpoint := strings.TrimRight(strings.TrimSpace(baseURL), "/") + "/rlm/context"
-	if endpoint == "" {
-		return "", errors.New("base URL is required")
-	}
-	payload, err := json.Marshal(rlmContextCreateRequest{Context: contextPayload})
-	if err != nil {
-		return "", fmt.Errorf("encode rlm context request: %w", err)
-	}
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return "", fmt.Errorf("build rlm context request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if apiKey != nil && strings.TrimSpace(apiKey.String()) != "" {
-		httpReq.Header.Set("X-ModelRelay-Api-Key", apiKey.String())
-	}
-	if header := strings.TrimSpace(clientHeader()); header != "" {
-		httpReq.Header.Set("X-ModelRelay-Client", header)
-	}
-
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read rlm context response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		msg := strings.TrimSpace(string(body))
-		if msg == "" {
-			msg = resp.Status
-		}
-		return "", fmt.Errorf("rlm context upload failed (%d): %s", resp.StatusCode, msg)
-	}
-
-	var parsed rlmContextCreateResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", fmt.Errorf("decode rlm context response: %w", err)
-	}
-	if strings.TrimSpace(parsed.ID) == "" {
-		return "", errors.New("rlm context response missing id")
-	}
-	return parsed.ID, nil
-}
-
-func validateRLMRemoteAttachments(files []rlmFileAttachment) error {
-	for _, file := range files {
-		if strings.TrimSpace(file.Text) == "" {
-			label := file.Name
-			if strings.TrimSpace(label) == "" {
-				label = file.Path
-			}
-			if strings.TrimSpace(label) == "" {
-				label = "attachment"
-			}
-			return fmt.Errorf("remote RLM requires inline text for %q (use --inline-text-max-bytes or drop --remote)", label)
-		}
-	}
-	return nil
-}
-
-func stripRemoteAttachmentPaths(files []rlmFileAttachment) []rlmFileAttachment {
-	if len(files) == 0 {
-		return files
-	}
-	out := make([]rlmFileAttachment, 0, len(files))
-	for _, file := range files {
-		file.Path = ""
-		out = append(out, file)
-	}
-	return out
-}
-
-func appendSystemPrompt(base, addition string) string {
-	if strings.TrimSpace(addition) == "" {
-		return strings.TrimSpace(base)
-	}
-	if strings.TrimSpace(base) == "" {
-		return strings.TrimSpace(addition)
-	}
-	return strings.TrimSpace(base) + "\n\n" + strings.TrimSpace(addition)
-}
-
-func writeRLMProgress(w io.Writer, events []rlmrunner.ProgressEvent) {
-	for _, evt := range events {
-		if strings.TrimSpace(evt.Status) == "" {
-			continue
-		}
-		_, _ = fmt.Fprintf(w, "rlm: %s\n", evt.Status)
-	}
-}
-
-func writeRLMAnswer(w io.Writer, raw json.RawMessage) error {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
-		return nil
-	}
-	var text string
-	if err := json.Unmarshal(trimmed, &text); err == nil {
-		_, err = fmt.Fprintln(w, text)
-		return err
-	}
-	var value any
-	if err := json.Unmarshal(trimmed, &value); err == nil {
-		formatted, err := json.MarshalIndent(value, "", "  ")
-		if err != nil {
-			return err
-		}
-		_, err = w.Write(append(formatted, '\n'))
-		return err
-	}
-	_, err := fmt.Fprintln(w, string(trimmed))
-	return err
-}
-
-func writeRawJSON(w io.Writer, raw json.RawMessage) error {
-	if len(raw) == 0 {
-		return nil
-	}
-	var buf bytes.Buffer
-	if err := json.Indent(&buf, raw, "", "  "); err != nil {
-		_, err = w.Write(append(raw, '\n'))
-		return err
-	}
-	_, err := w.Write(append(buf.Bytes(), '\n'))
-	return err
-}
-
-func isJSONNull(raw json.RawMessage) bool {
-	return len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
