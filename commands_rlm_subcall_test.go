@@ -165,7 +165,7 @@ func TestLocalSubcallHandler_RejectsInvalidCostControls(t *testing.T) {
 	handler, cleanup := newSubcallTestHandler(t, captured, localSubcallDefaults{})
 	defer cleanup()
 
-	rec := doLocalSubcall(t, handler, map[string]any{"prompt": "hello", "reasoning_effort": "max"})
+	rec := doLocalSubcall(t, handler, map[string]any{"prompt": "hello", "reasoning_effort": "ultra"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
@@ -180,12 +180,12 @@ func TestLocalSubcallHandler_RejectsInvalidCostControls(t *testing.T) {
 }
 
 func TestValidSubcallReasoningEffort_AcceptsFullLadderAndRejectsJunk(t *testing.T) {
-	for _, effort := range []string{"", "none", "minimal", "low", "medium", "high", "xhigh"} {
+	for _, effort := range []string{"", "none", "minimal", "low", "medium", "high", "xhigh", "max"} {
 		if !validSubcallReasoningEffort(effort) {
 			t.Errorf("validSubcallReasoningEffort(%q) = false, want true", effort)
 		}
 	}
-	for _, effort := range []string{"max", "MEDIUM", "ultra", "pro"} {
+	for _, effort := range []string{"MEDIUM", "ultra", "pro"} {
 		if validSubcallReasoningEffort(effort) {
 			t.Errorf("validSubcallReasoningEffort(%q) = true, want false", effort)
 		}
