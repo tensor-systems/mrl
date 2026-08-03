@@ -303,7 +303,10 @@ Examples:
 				payload["price_amount_cents"] = priceCents
 				payload["price_interval"] = strings.TrimSpace(interval)
 				payload["trial_days"] = trialDays
-				if spendLimit > 0 {
+				// The flag is only sent when the caller set it. Omitting the
+				// field asserts that the tier has no ceiling; sending 0 would
+				// assert a real ceiling of zero, which permits no spend.
+				if cmd.Flags().Changed("spend-limit") {
 					payload["spend_limit_cents"] = spendLimit
 				}
 			}
@@ -340,7 +343,7 @@ Examples:
 	cmd.Flags().StringVar(&interval, "interval", "", "Billing interval: month|year (subscription tiers)")
 	cmd.Flags().Int32Var(&trialDays, "trial-days", 0, "Free-trial length in days (subscription tiers)")
 	cmd.Flags().Int64Var(&promoCents, "promo-credits", 0, "Promo credit granted on first customer token, in cents")
-	cmd.Flags().Int64Var(&spendLimit, "spend-limit", 0, "Spend limit in cents (subscription tiers)")
+	cmd.Flags().Int64Var(&spendLimit, "spend-limit", 0, "Spend ceiling in cents (subscription tiers); omit for no ceiling, 0 permits no spend")
 	cmd.Flags().StringArrayVar(&models, "model", nil, "Model id available on the tier (repeatable)")
 	cmd.Flags().StringVar(&defaultModel, "default-model", "", "Which --model is the default")
 	cmd.Flags().Int64Var(&tokenTTL, "token-ttl", 0, "Customer-token max TTL in seconds")
@@ -505,19 +508,15 @@ func printTiersTable(tiers []generated.Tier) {
 	_, _ = fmt.Fprintln(w, "ID\tCODE\tDISPLAY_NAME\tSPEND_LIMIT_CENTS\tPRICE_CENTS\tINTERVAL")
 	for index := range tiers {
 		tier := &tiers[index]
-		spend := uint64(0)
-		if tier.SpendLimitCents != nil {
-			spend = *tier.SpendLimitCents
-		}
 		price := uint64(0)
 		if tier.PriceAmountCents != nil {
 			price = *tier.PriceAmountCents
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\n",
 			formatUUIDPtr(tier.Id),
 			stringOrEmpty(tier.TierCode),
 			stringOrEmpty(tier.DisplayName),
-			spend,
+			formatSpendCeiling(tier.SpendLimitCents),
 			price,
 			stringOrEmpty(tier.PriceInterval),
 		)
@@ -525,11 +524,16 @@ func printTiersTable(tiers []generated.Tier) {
 	_ = w.Flush()
 }
 
-func printTierDetails(tier generated.Tier) {
-	spend := uint64(0)
-	if tier.SpendLimitCents != nil {
-		spend = *tier.SpendLimitCents
+// formatSpendCeiling keeps "no ceiling" distinct from a ceiling of zero, which
+// permits no spend. Printing 0 for both would hide the difference.
+func formatSpendCeiling(cents *uint64) string {
+	if cents == nil {
+		return "none"
 	}
+	return fmt.Sprintf("%d", *cents)
+}
+
+func printTierDetails(tier generated.Tier) {
 	price := uint64(0)
 	if tier.PriceAmountCents != nil {
 		price = *tier.PriceAmountCents
@@ -543,7 +547,7 @@ func printTierDetails(tier generated.Tier) {
 		{Key: "project_id", Value: formatUUIDPtr(tier.ProjectId)},
 		{Key: "tier_code", Value: stringOrEmpty(tier.TierCode)},
 		{Key: "display_name", Value: stringOrEmpty(tier.DisplayName)},
-		{Key: "spend_limit_cents", Value: fmt.Sprintf("%d", spend)},
+		{Key: "spend_limit_cents", Value: formatSpendCeiling(tier.SpendLimitCents)},
 		{Key: "price_amount_cents", Value: fmt.Sprintf("%d", price)},
 		{Key: "price_currency", Value: stringOrEmpty(tier.PriceCurrency)},
 		{Key: "price_interval", Value: stringOrEmpty(tier.PriceInterval)},
