@@ -375,6 +375,21 @@ mrl tier create --code paygo --name "Pay as you go" --billing-mode paygo \
 | `--default-model` | Which `--model` is the default |
 | `--token-ttl` | Customer-token max TTL in seconds |
 
+Install a server-reviewed recursive profile on one existing preset:
+
+```bash
+mrl --project <project-uuid> tier preset update-rlm-profile balanced \
+  --tier <tier-uuid> \
+  --profile cozy-launch \
+  --expect-current-kind single \
+  --expect-current-model gpt-5.6-terra
+```
+
+The expected kind and concrete model are checked transactionally. The command
+cannot create a missing preset and accepts no caller-defined routes, limits, or
+revision JSON. An idempotent re-run uses `--expect-current-kind recursive` with
+the installed root model.
+
 ## Releasing
 
 To release a new version (from monorepo):

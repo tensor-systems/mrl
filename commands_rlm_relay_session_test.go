@@ -61,7 +61,7 @@ fi
 			}
 			writeRelaySessionJSON(t, w, grantCreateResponse{
 				GrantID: "execution-1", Credential: "grant-token",
-				MaxSettledSpendMicrocents: 100,
+				MaxSettledSpendMicrocents: 60,
 			})
 		case "/grants/execution-1/finalize":
 			writeRelaySessionJSON(t, w, map[string]any{})
@@ -96,6 +96,28 @@ fi
 	wantPaths := []string{"/grants/resolve", "/grants", "/grants/execution-1/finalize"}
 	if strings.Join(requestPath, "\n") != strings.Join(wantPaths, "\n") {
 		t.Fatalf("request paths = %v, want %v", requestPath, wantPaths)
+	}
+}
+
+func TestValidateIssuedRLMSpendAuthority(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		resolved int64
+		issued   int64
+		wantErr  bool
+	}{
+		{name: "equal", resolved: 100, issued: 100},
+		{name: "remaining allowance tail", resolved: 100, issued: 1},
+		{name: "missing", resolved: 100, issued: 0, wantErr: true},
+		{name: "negative", resolved: 100, issued: -1, wantErr: true},
+		{name: "widened", resolved: 100, issued: 101, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateIssuedRLMSpendAuthority(test.resolved, test.issued)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validateIssuedRLMSpendAuthority(%d, %d) = %v, wantErr %v", test.resolved, test.issued, err, test.wantErr)
+			}
+		})
 	}
 }
 

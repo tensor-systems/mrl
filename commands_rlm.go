@@ -1549,12 +1549,17 @@ func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, authority grantA
 		defer cancel()
 		return doGrantJSON(finalizeCtx, nil, baseURL, authority, http.MethodPost, "/grants/"+url.PathEscape(issued.GrantID)+"/finalize", struct{}{}, &executionEvidence)
 	}
-	if issued.MaxSettledSpendMicrocents != resolution.MaxSettledSpendMicrocents {
+	if err := validateIssuedRLMSpendAuthority(
+		resolution.MaxSettledSpendMicrocents, issued.MaxSettledSpendMicrocents,
+	); err != nil {
 		if finalizeErr := finalizeGrant(); finalizeErr != nil {
-			return fmt.Errorf("RLM execution spend ceiling changed after resolution; finalize mismatched issued: %w", finalizeErr)
+			return fmt.Errorf("%v; finalize invalid issued grant: %w", err, finalizeErr)
 		}
-		return errors.New("RLM execution spend ceiling changed after resolution")
+		return err
 	}
+	// Resolve advertises the natural maximum. Create is the allocation point;
+	// its positive, non-widening value is the immutable authority for this run.
+	resolution.MaxSettledSpendMicrocents = issued.MaxSettledSpendMicrocents
 	// The runner speaks the callback envelope, and the callback endpoints are
 	// gone (#1896). It therefore talks to the same loopback proxy the local
 	// path uses, and the proxy makes ordinary /responses calls bearing the
@@ -1610,6 +1615,16 @@ func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, authority grantA
 		return writeRLMLocalOutcomeWithEvidenceTo(os.Stdout, cfg, nil, runResult.Response, runErr, &executionEvidence)
 	}
 	return writeRLMLocalOutcomeWithEvidenceTo(os.Stdout, cfg, nil, runResult.Response, nil, &executionEvidence)
+}
+
+func validateIssuedRLMSpendAuthority(resolvedMaximum, issued int64) error {
+	if issued <= 0 {
+		return errors.New("RLM execution grant omitted authoritative spend ceiling")
+	}
+	if issued > resolvedMaximum {
+		return errors.New("RLM execution spend ceiling widened after resolution")
+	}
+	return nil
 }
 
 func doGrantJSON(ctx context.Context, httpClient *http.Client, baseURL string, authority grantAuthority, method, path string, requestBody, responseBody any) error {

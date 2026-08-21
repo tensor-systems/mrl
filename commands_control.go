@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -222,7 +223,109 @@ func newTierCmd() *cobra.Command {
 		Use:   "tier",
 		Short: "Manage tiers",
 	}
-	cmd.AddCommand(newTierListCmd(), newTierGetCmd(), newTierCreateCmd())
+	cmd.AddCommand(newTierListCmd(), newTierGetCmd(), newTierCreateCmd(), newTierPresetCmd())
+	return cmd
+}
+
+func newTierPresetCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "preset",
+		Short: "Manage tier presets",
+	}
+	cmd.AddCommand(newTierPresetUpdateRLMProfileCmd())
+	return cmd
+}
+
+func newTierPresetUpdateRLMProfileCmd() *cobra.Command {
+	var tierID string
+	var profile string
+	var expectedCurrentKind string
+	var expectedCurrentModel string
+
+	cmd := &cobra.Command{
+		Use:   "update-rlm-profile <preset-code>",
+		Short: "Install a reviewed RLM profile on an existing tier preset",
+		Long: `Install a server-reviewed RLM profile on exactly one existing preset.
+
+The expected execution kind and model are checked under the same lock as the
+write. Missing presets are never created, and routes or revision fields cannot
+be supplied by the caller. This command requires 'mrl auth login'.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := runtimeConfigFrom(cmd)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(cfg.Token) == "" {
+				return errors.New("account token required: run 'mrl auth login' first")
+			}
+			projectID := strings.TrimSpace(cfg.ProjectID)
+			if _, err = uuid.Parse(projectID); err != nil {
+				return errors.New("valid project UUID required: pass --project or set project_id in the profile")
+			}
+			tierID = strings.TrimSpace(tierID)
+			if _, err = uuid.Parse(tierID); err != nil {
+				return errors.New("--tier must be a valid UUID")
+			}
+			presetCode := strings.TrimSpace(args[0])
+			if presetCode == "" {
+				return errors.New("preset code required")
+			}
+			profile = strings.TrimSpace(profile)
+			if profile == "" {
+				return errors.New("--profile is required")
+			}
+			expectedCurrentKind = strings.TrimSpace(expectedCurrentKind)
+			if expectedCurrentKind != "single" && expectedCurrentKind != "recursive" {
+				return errors.New("--expect-current-kind must be 'single' or 'recursive'")
+			}
+			expectedCurrentModel = strings.TrimSpace(expectedCurrentModel)
+			if expectedCurrentModel == "" {
+				return errors.New("--expect-current-model is required")
+			}
+
+			payload := generated.TierPresetRLMProfileUpdateRequest{
+				Profile:            profile,
+				ExpectCurrentKind:  generated.TierPresetRLMProfileUpdateRequestExpectCurrentKind(expectedCurrentKind),
+				ExpectCurrentModel: expectedCurrentModel,
+			}
+			path := fmt.Sprintf(
+				"/projects/%s/tiers/%s/presets/%s/rlm-profile",
+				projectID, tierID, url.PathEscape(presetCode),
+			)
+			ctx, cancel := contextWithTimeout(cfg.Timeout)
+			defer cancel()
+
+			var response generated.TierPresetRLMProfileUpdateResponse
+			if err = doJSON(ctx, cfg, authModeBearer, http.MethodPost, path, payload, &response); err != nil {
+				return err
+			}
+			if cfg.Output == outputFormatJSON {
+				printJSON(response)
+				return nil
+			}
+			printKeyValueTable([]kvPair{
+				{Key: "changed", Value: fmt.Sprintf("%t", response.Changed)},
+				{Key: "project_id", Value: projectID},
+				{Key: "tier_id", Value: tierID},
+				{Key: "preset_code", Value: response.Preset.PresetCode},
+				{Key: "profile", Value: response.Profile},
+				{Key: "revision_id", Value: response.Revision.RevisionId},
+				{Key: "content_hash", Value: response.Revision.ContentHash},
+				{Key: "root_model", Value: response.Revision.Root.Model},
+				{Key: "subcall_model", Value: response.Revision.Subcall.Model},
+			})
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&tierID, "tier", "", "Tier UUID")
+	cmd.Flags().StringVar(&profile, "profile", "", "Server-reviewed RLM profile name")
+	cmd.Flags().StringVar(&expectedCurrentKind, "expect-current-kind", "", "Expected current execution kind: single|recursive")
+	cmd.Flags().StringVar(&expectedCurrentModel, "expect-current-model", "", "Expected current concrete root model")
+	_ = cmd.MarkFlagRequired("tier")
+	_ = cmd.MarkFlagRequired("profile")
+	_ = cmd.MarkFlagRequired("expect-current-kind")
+	_ = cmd.MarkFlagRequired("expect-current-model")
 	return cmd
 }
 
