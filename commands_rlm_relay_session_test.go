@@ -73,7 +73,7 @@ fi
 
 	err := runRLMRelaySession(
 		t.Context(), runtimeConfig{BaseURL: server.URL, Output: outputFormatJSON},
-		rlmTestProjectAuthority("customer-123"), "preset:test", "question", rlm.ContextPlan{},
+		rlmTestProjectAuthority("customer-123"), "test", "question", rlm.ContextPlan{},
 		&rlmFlags{pythonPath: pythonPath},
 	)
 	if err != nil {
@@ -154,7 +154,7 @@ exit 1
 
 	err := runRLMRelaySession(
 		t.Context(), runtimeConfig{BaseURL: server.URL, Output: outputFormatJSON},
-		rlmTestProjectAuthority("customer-123"), "preset:test", "question", rlm.ContextPlan{},
+		rlmTestProjectAuthority("customer-123"), "test", "question", rlm.ContextPlan{},
 		&rlmFlags{pythonPath: pythonPath},
 	)
 	if err == nil || !strings.Contains(err.Error(), "preflight local Droste") {
@@ -230,7 +230,7 @@ fi
 			<-start
 			errorsByRun <- runRLMRelaySession(
 				t.Context(), runtimeConfig{BaseURL: server.URL, Output: outputFormatJSON},
-				rlmTestProjectAuthority("customer-123"), "preset:test", "question", rlm.ContextPlan{},
+				rlmTestProjectAuthority("customer-123"), "test", "question", rlm.ContextPlan{},
 				&rlmFlags{pythonPath: pythonPath},
 			)
 		}()
@@ -330,8 +330,8 @@ func TestDoRLMLeaseJSONUsesOneCustomerAuthority(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
-		if request.Model != "preset:test" {
-			t.Errorf("model = %q", request.Model)
+		if request.Preset != "test" {
+			t.Errorf("preset = %q", request.Preset)
 		}
 		_, _ = w.Write([]byte(`{"profile":{"selector":"preset:test"}}`))
 	}))
@@ -342,7 +342,7 @@ func TestDoRLMLeaseJSONUsesOneCustomerAuthority(t *testing.T) {
 			Selector string `json:"selector"`
 		} `json:"profile"`
 	}
-	if err := doGrantJSON(t.Context(), server.Client(), server.URL, rlmTestProjectAuthority("customer-123"), http.MethodPost, "/grants/resolve", grantResolutionRequest{Model: "preset:test"}, &response); err != nil {
+	if err := doGrantJSON(t.Context(), server.Client(), server.URL, rlmTestProjectAuthority("customer-123"), http.MethodPost, "/grants/resolve", grantResolutionRequest{Preset: "test"}, &response); err != nil {
 		t.Fatalf("doGrantJSON: %v", err)
 	}
 	if gotPath != "/grants/resolve" || gotKey != "mr_sk_test" || gotClient == "" || gotCustomer != "customer-123" {

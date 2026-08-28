@@ -46,6 +46,7 @@ func newRLMCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&flags.model, "model", "", "Model ID (overrides profile default)")
+	cmd.Flags().StringVar(&flags.preset, "preset", "", "Tier preset code for --relay-session")
 	cmd.Flags().StringArrayVarP(&flags.attachments, "attachment", "a", nil, "Attach a local file (repeatable; use '-' for stdin)")
 	cmd.Flags().StringVar(&flags.attachmentType, "attachment-type", "", "Override attachment MIME type (useful for stdin)")
 	cmd.Flags().BoolVar(&flags.attachStdin, "attach-stdin", false, "Attach stdin as a file")
@@ -79,6 +80,7 @@ func newRLMCmd() *cobra.Command {
 
 type rlmFlags struct {
 	model                   string
+	preset                  string
 	system                  string
 	systemOverride          bool
 	attachments             []string
@@ -155,8 +157,18 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 		return err
 	}
 	model := resolveModel(flags.model, cfg)
-	if model == "" {
+	if !flags.relaySession && model == "" {
 		return errors.New("model is required (set via --model, MODELRELAY_MODEL, or mrl config set --model)")
+	}
+	preset := strings.TrimSpace(flags.preset)
+	if flags.relaySession && preset == "" {
+		return errors.New("--preset is required for --relay-session")
+	}
+	if !flags.relaySession && preset != "" {
+		return errors.New("--preset requires --relay-session")
+	}
+	if flags.relaySession && cmd.Flags().Changed("model") {
+		return errors.New("--model cannot be combined with --relay-session; use --preset")
 	}
 
 	stdinIsTTY, err := isTerminal(os.Stdin)
@@ -271,7 +283,7 @@ func runRLM(cmd *cobra.Command, args []string, flags *rlmFlags) error {
 		if strings.TrimSpace(flags.db) != "" || strings.TrimSpace(flags.postgresDSNEnv) != "" || strings.TrimSpace(flags.snowflakeBrokerURL) != "" || len(flags.mcpConfigs) > 0 {
 			return errors.New("--relay-session currently supports message/context workloads only; SQL and MCP transports remain local-mode only")
 		}
-		return runRLMRelaySession(ctx, cfg, relayAuthority, model, strings.Join(args, " "), plan, flags)
+		return runRLMRelaySession(ctx, cfg, relayAuthority, preset, strings.Join(args, " "), plan, flags)
 	}
 
 	usage := &rlmUsage{}
@@ -1353,8 +1365,8 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 type grantResolutionRequest struct {
-	Model string `json:"model"`
-	Seed  *int64 `json:"seed"`
+	Preset string `json:"preset"`
+	Seed   *int64 `json:"seed"`
 }
 
 type grantResolutionResponse struct {
@@ -1364,7 +1376,7 @@ type grantResolutionResponse struct {
 }
 
 type grantCreateRequest struct {
-	Model                        string                            `json:"model"`
+	Preset                       string                            `json:"preset"`
 	Seed                         *int64                            `json:"seed"`
 	ScaffoldManifest             rlmprofile.DrosteScaffoldManifest `json:"scaffold_manifest"`
 	ExpectedRevisionID           rlmprofile.RevisionID             `json:"expected_revision_id"`
@@ -1434,10 +1446,10 @@ func applyRLMLeaseAuthority(req *http.Request, authority grantAuthority) error {
 	return nil
 }
 
-func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, authority grantAuthority, model, query string, plan rlm.ContextPlan, flags *rlmFlags) error {
+func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, authority grantAuthority, preset, query string, plan rlm.ContextPlan, flags *rlmFlags) error {
 	var resolution grantResolutionResponse
 	if err := doGrantJSON(ctx, nil, cfg.BaseURL, authority, http.MethodPost, "/grants/resolve", grantResolutionRequest{
-		Model: model, Seed: flags.seed,
+		Preset: preset, Seed: flags.seed,
 	}, &resolution); err != nil {
 		return fmt.Errorf("resolve RLM execution grant: %w", err)
 	}
@@ -1532,7 +1544,7 @@ func runRLMRelaySession(ctx context.Context, cfg runtimeConfig, authority grantA
 	}
 	var issued grantCreateResponse
 	if err := doGrantJSON(ctx, nil, cfg.BaseURL, authority, http.MethodPost, "/grants", grantCreateRequest{
-		Model: model, Seed: flags.seed, ScaffoldManifest: preflight.Preflight.ScaffoldManifest,
+		Preset: preset, Seed: flags.seed, ScaffoldManifest: preflight.Preflight.ScaffoldManifest,
 		ExpectedRevisionID:           profile.RevisionID,
 		ExpectedRevisionContentHash:  profile.RevisionContentHash,
 		ExpectedEffectiveFingerprint: profile.EffectiveFingerprint,
