@@ -353,11 +353,11 @@ profile). A tier is either a flat `subscription` (Stripe price) or a metered
 # A flat Pro subscription ($10/mo) billed via Stripe.
 mrl tier create --code pro --name "Pro" --billing-mode subscription \
   --provider stripe --price 1000 --interval month \
-  --model gemini-3.7-flash --default-model gemini-3.7-flash
+  --model grok-4.6 --default-model grok-4.6
 
 # A pay-as-you-go tier seeded with $1 of promo credit.
 mrl tier create --code paygo --name "Pay as you go" --billing-mode paygo \
-  --promo-credits 100 --model gemini-3.7-flash --default-model gemini-3.7-flash
+  --promo-credits 100 --model grok-4.6 --default-model grok-4.6
 ```
 
 | Flag | Description |
