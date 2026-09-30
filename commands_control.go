@@ -358,11 +358,11 @@ Examples:
   # A flat Pro subscription ($10/mo) billed via Stripe:
   mrl tier create --code pro --name "Pro" --billing-mode subscription \
     --provider stripe --price 1000 --interval month \
-    --model grok-4.6 --default-model grok-4.6
+    --model grok-4.7 --default-model grok-4.7
 
   # A pay-as-you-go tier seeded with $1 of promo credit:
   mrl tier create --code paygo --name "Pay as you go" --billing-mode paygo \
-    --promo-credits 100 --model grok-4.6 --default-model grok-4.6`,
+    --promo-credits 100 --model grok-4.7 --default-model grok-4.7`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := runtimeConfigFrom(cmd)
 			if err != nil {

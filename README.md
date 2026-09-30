@@ -66,7 +66,7 @@ Environment variables:
 
 ```bash
 export MODELRELAY_API_KEY=mr_sk_...
-export MODELRELAY_MODEL=claude-sonnet-5  # default model
+export MODELRELAY_MODEL=claude-sonnet-5-5  # default model
 export MODELRELAY_PROJECT_ID=...           # UUID (optional)
 export MODELRELAY_API_BASE_URL=...         # optional
 ```
@@ -76,7 +76,7 @@ Config file (`~/.config/mrl/config.toml`):
 ```toml
 [profiles.default]
 api_key = "mr_sk_..."
-model = "claude-sonnet-5"
+model = "claude-sonnet-5-5"
 base_url = "https://api.modelrelay.ai/api/v1"
 project_id = "<uuid>"
 output = "table"  # or "json"
@@ -90,7 +90,7 @@ trace = true
 Manage config with:
 
 ```bash
-mrl config set --api-key mr_sk_... --model claude-sonnet-5
+mrl config set --api-key mr_sk_... --model claude-sonnet-5-5
 mrl config set --allow-all --trace  # enable for `mrl do`
 mrl config set --profile work --model gpt-5.2
 mrl config use work
@@ -353,11 +353,11 @@ profile). A tier is either a flat `subscription` (Stripe price) or a metered
 # A flat Pro subscription ($10/mo) billed via Stripe.
 mrl tier create --code pro --name "Pro" --billing-mode subscription \
   --provider stripe --price 1000 --interval month \
-  --model grok-4.6 --default-model grok-4.6
+  --model grok-4.7 --default-model grok-4.7
 
 # A pay-as-you-go tier seeded with $1 of promo credit.
 mrl tier create --code paygo --name "Pay as you go" --billing-mode paygo \
-  --promo-credits 100 --model grok-4.6 --default-model grok-4.6
+  --promo-credits 100 --model grok-4.7 --default-model grok-4.7
 ```
 
 | Flag | Description |
@@ -382,7 +382,7 @@ mrl --project <project-uuid> tier preset update-rlm-profile balanced \
   --tier <tier-uuid> \
   --profile cozy-launch \
   --expect-current-kind single \
-  --expect-current-model gpt-5.6-terra
+  --expect-current-model gpt-6.1-sol
 ```
 
 The expected kind and concrete model are checked transactionally. The command
