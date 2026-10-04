@@ -104,6 +104,7 @@ one. Key creation uses your account login, not an API key:
 
 ```bash
 mrl auth login --web                 # browser OAuth (GitHub by default)
+mrl auth login --device              # headless/remote machine: approve a link on any device
 
 # Create a key, print it once, and save it as the active profile's api_key:
 mrl keys create --name laptop
@@ -353,6 +354,12 @@ administration instead require an **account bearer token**, obtained with
 `mrl auth login` and stored in the active profile.
 
 ```bash
+# Device sign-in — for a headless server or a remote machine (e.g. one an agent
+# drives while you chat from your phone). Prints a link with the code filled in;
+# open it anywhere, sign in or sign up, tap Approve:
+mrl auth login --device
+mrl auth login --device --json        # {"verification_uri_complete":...} first
+
 # Browser OAuth (GitHub/Google accounts) — opens your browser, no password:
 mrl auth login --web                  # provider defaults to github
 mrl auth login --web --provider google
@@ -371,7 +378,23 @@ mrl keys create --name laptop
 
 `--web` runs a standard loopback OAuth flow (RFC 8252): it opens your browser to
 the provider and captures the account token on an ephemeral `127.0.0.1` port — no
-password and no manual token copying.
+password and no manual token copying. It needs a browser on the machine running
+`mrl`.
+
+`--device` uses the OAuth 2.0 Device Authorization Grant (RFC 8628) and works
+when the browser is somewhere else. The first line of stdout is the link and
+code to relay:
+
+```text
+Open https://modelrelay.ai/device?code=WDJB-MJHT and approve code WDJB-MJHT
+```
+
+The link opens the dashboard's sign-in (GitHub, Google, or a new account) and
+comes back to an Approve button with the code filled in. `mrl` polls every few
+seconds (slowing down if the server asks), saves the token exactly as `--web`
+does, and exits; the code expires after 10 minutes. With `--json`, stdout is one
+JSON line with `verification_uri_complete`, `verification_uri`, `user_code`,
+`expires_in` and `interval`, then `{"status":"logged_in","profile":...}`.
 
 Create a tier in the active project (`--project` / `MODELRELAY_PROJECT_ID` /
 profile). A tier is either a flat `subscription` (Stripe price) or a metered

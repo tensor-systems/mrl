@@ -39,17 +39,24 @@ func newAuthLoginCmd() *cobra.Command {
 	var password string
 	var passwordStdin bool
 	var web bool
+	var device bool
 	var provider string
 
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Log in and store an account token (password or --web OAuth)",
+		Short: "Log in and store an account token (--device, --web, or password)",
 		Long: `Obtain a ModelRelay account token and store it in the active profile,
 for use by project/tier admin commands.
 
-Two modes:
+Three modes:
 
-  # Browser OAuth (GitHub/Google accounts) — opens your browser, no password:
+  # Device sign-in — for a headless or remote machine. Prints a link with the
+  # code filled in; open it on any device (e.g. your phone), sign in or sign up
+  # with any method, and tap Approve. mrl waits and saves the token:
+  mrl auth login --device
+  mrl auth login --device --json           # link and code as a JSON line first
+
+  # Browser OAuth (GitHub/Google accounts) — opens a browser on this machine:
   mrl auth login --web                     # provider defaults to github
   mrl auth login --web --provider google
 
@@ -61,12 +68,18 @@ Two modes:
 			if err != nil {
 				return err
 			}
+			if device && web {
+				return errors.New("choose one of --device or --web")
+			}
+			if device {
+				return runDeviceLogin(cfg, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			}
 			if web {
 				return runWebLogin(cfg, strings.TrimSpace(provider))
 			}
 			email = strings.TrimSpace(email)
 			if email == "" {
-				return errors.New("--email is required (or use --web for browser OAuth)")
+				return errors.New("--email is required (or use --device or --web)")
 			}
 			password, err = resolveLoginPassword(password, passwordStdin)
 			if err != nil {
@@ -92,6 +105,7 @@ Two modes:
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&device, "device", false, "Log in by approving a link on any device (for headless or remote machines)")
 	cmd.Flags().BoolVar(&web, "web", false, "Log in via the browser (OAuth) instead of a password")
 	cmd.Flags().StringVar(&provider, "provider", "github", "OAuth provider for --web (e.g. github, google)")
 	cmd.Flags().StringVar(&email, "email", "", "Account email (password login)")
@@ -152,7 +166,7 @@ func persistAccountToken(profileName, token, refreshToken string) error {
 
 // errAccountLoginRequired is returned when an account-token command has no
 // usable session: no stored token, or one that is expired and cannot be refreshed.
-var errAccountLoginRequired = errors.New("not logged in (or the session expired): run 'mrl auth login --web'")
+var errAccountLoginRequired = errors.New("not logged in (or the session expired): run 'mrl auth login --web' (or --device on a remote machine)")
 
 // doAccountJSON performs an account-bearer request. When the server rejects the
 // access token with 401 and the profile holds a refresh token, it refreshes the
