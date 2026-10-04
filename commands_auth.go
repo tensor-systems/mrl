@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -25,8 +26,9 @@ func newAuthCmd() *cobra.Command {
 		Long: `Account authentication.
 
 Most mrl commands use a data-plane secret API key (mr_sk_*). Project and tier
-administration (e.g. 'mrl tier create') instead require an account bearer token,
-which 'mrl auth login' obtains and stores in the active profile.`,
+administration and API key creation (e.g. 'mrl tier create', 'mrl keys create')
+instead require an account bearer token, which 'mrl auth login' obtains and
+stores in the active profile.`,
 	}
 	cmd.AddCommand(newAuthLoginCmd(), newAuthLogoutCmd())
 	return cmd
@@ -142,16 +144,53 @@ func resolveLoginPassword(passwordFlag string, passwordStdin bool) (string, erro
 // persistAccountToken writes the account token (and refresh token) into the named
 // profile, leaving all other profile fields untouched.
 func persistAccountToken(profileName, token, refreshToken string) error {
-	fileCfg, err := loadCLIConfig()
-	if err != nil {
+	return updateProfile(profileName, func(p *cliProfile) {
+		p.Token = token
+		p.RefreshToken = refreshToken
+	})
+}
+
+// errAccountLoginRequired is returned when an account-token command has no
+// usable session: no stored token, or one that is expired and cannot be refreshed.
+var errAccountLoginRequired = errors.New("not logged in (or the session expired): run 'mrl auth login --web'")
+
+// doAccountJSON performs an account-bearer request. When the server rejects the
+// access token with 401 and the profile holds a refresh token, it refreshes the
+// session once via /auth/refresh, persists the new tokens to the profile, and
+// retries. cfg.Token is updated in place so later calls reuse the new token.
+func doAccountJSON(ctx context.Context, cfg *runtimeConfig, method, path string, payload any, out any) error {
+	if strings.TrimSpace(cfg.Token) == "" {
+		return errAccountLoginRequired
+	}
+	err := doJSON(ctx, *cfg, authModeBearer, method, path, payload, out)
+	if !isUnauthorized(err) {
 		return err
 	}
-	if fileCfg.Profiles == nil {
-		fileCfg.Profiles = map[string]cliProfile{}
+	if strings.TrimSpace(cfg.RefreshToken) == "" {
+		return errAccountLoginRequired
 	}
-	profileCfg := profileFor(fileCfg, profileName)
-	profileCfg.Token = token
-	profileCfg.RefreshToken = refreshToken
-	fileCfg.Profiles[profileName] = profileCfg
-	return writeCLIConfig(fileCfg)
+	var refreshed loginResponse
+	if refreshErr := doJSON(ctx, *cfg, authModeNone, http.MethodPost, "/auth/refresh",
+		map[string]any{"refresh_token": cfg.RefreshToken}, &refreshed); refreshErr != nil {
+		if isUnauthorized(refreshErr) {
+			return errAccountLoginRequired
+		}
+		return fmt.Errorf("refresh account session: %w", refreshErr)
+	}
+	if strings.TrimSpace(refreshed.AccessToken) == "" {
+		return errAccountLoginRequired
+	}
+	if strings.TrimSpace(refreshed.RefreshToken) == "" {
+		refreshed.RefreshToken = cfg.RefreshToken
+	}
+	if persistErr := persistAccountToken(cfg.Profile, refreshed.AccessToken, refreshed.RefreshToken); persistErr != nil {
+		return fmt.Errorf("save refreshed account token: %w", persistErr)
+	}
+	cfg.Token = refreshed.AccessToken
+	cfg.RefreshToken = refreshed.RefreshToken
+	err = doJSON(ctx, *cfg, authModeBearer, method, path, payload, out)
+	if isUnauthorized(err) {
+		return errAccountLoginRequired
+	}
+	return err
 }

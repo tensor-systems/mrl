@@ -81,7 +81,7 @@ func newConfigSetCmd() *cobra.Command {
 			profileCfg := profileFor(cfg, profileName)
 
 			if cmd.Flags().Changed("api-key") {
-				profileCfg.APIKey = strings.TrimSpace(apiKey)
+				profileCfg.setAPIKey(apiKey)
 			}
 			if cmd.Flags().Changed("base-url") {
 				profileCfg.BaseURL = strings.TrimSpace(baseURL)

@@ -97,6 +97,30 @@ mrl config use work
 mrl config show
 ```
 
+### Create an API key from the CLI
+
+Instead of copying a key from the dashboard, log in once and let `mrl` create
+one. Key creation uses your account login, not an API key:
+
+```bash
+mrl auth login --web                 # browser OAuth (GitHub by default)
+
+# Create a key, print it once, and save it as the active profile's api_key:
+mrl keys create --name laptop
+
+# Print only the secret (newline-terminated) and save nothing — for scripts:
+KEY=$(mrl keys create --name my-app --print)
+
+# List keys (redacted)
+mrl keys list
+```
+
+The key is created in `--project` (or `MODELRELAY_PROJECT_ID` / the profile's
+`project_id`); otherwise in your account's default project. If the account has
+several projects and no default, `mrl` lists them and asks for `--project`.
+An expired login is refreshed automatically; if that fails, run
+`mrl auth login --web` again.
+
 ## Commands
 
 ### Ask a question (default)
@@ -339,6 +363,10 @@ printf '%s' "$PASSWORD" | mrl auth login --email you@example.com --password-stdi
 
 # Clear the stored account token.
 mrl auth logout
+
+# Create a secret API key with the account login (see "Create an API key from
+# the CLI" above).
+mrl keys create --name laptop
 ```
 
 `--web` runs a standard loopback OAuth flow (RFC 8252): it opens your browser to

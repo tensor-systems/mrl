@@ -74,10 +74,26 @@ func doJSONRaw(ctx context.Context, cfg runtimeConfig, mode authMode, method, pa
 		if msg == "" {
 			msg = resp.Status
 		}
-		return nil, fmt.Errorf("request failed: status=%d body=%s", resp.StatusCode, msg)
+		return nil, &httpStatusError{StatusCode: resp.StatusCode, Body: msg}
 	}
 
 	return data, nil
+}
+
+// httpStatusError is returned by doJSONRaw for any non-2xx response, so callers
+// can branch on the status (e.g. refresh an expired account token on 401).
+type httpStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("request failed: status=%d body=%s", e.StatusCode, e.Body)
+}
+
+func isUnauthorized(err error) bool {
+	var statusErr *httpStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusUnauthorized
 }
 
 func applyAuth(req *http.Request, cfg runtimeConfig, mode authMode) error {

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -23,7 +24,11 @@ func printJSON(payload any) {
 }
 
 func printKeyValueTable(pairs []kvPair) {
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fprintKeyValueTable(os.Stdout, pairs)
+}
+
+func fprintKeyValueTable(out io.Writer, pairs []kvPair) {
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "FIELD\tVALUE")
 	for _, pair := range pairs {
 		if pair.Value == "" {

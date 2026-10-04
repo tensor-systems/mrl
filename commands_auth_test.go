@@ -65,3 +65,41 @@ func TestResolveRuntimeConfig_Token(t *testing.T) {
 		t.Fatalf("expected token from profile, got %q", cfg.Token)
 	}
 }
+
+func TestResolveRuntimeConfig_RefreshTokenOnlyForProfileToken(t *testing.T) {
+	newCmd := func() *cobra.Command {
+		cmd := &cobra.Command{}
+		cmd.Flags().String("profile", "", "")
+		cmd.Flags().String("base-url", "", "")
+		cmd.Flags().String("project", "", "")
+		cmd.Flags().String("api-key", "", "")
+		cmd.Flags().String("token", "", "")
+		cmd.Flags().Bool("json", false, "")
+		cmd.Flags().Duration("timeout", 30, "")
+		return cmd
+	}
+	cfgFile := cliConfig{
+		CurrentProfile: "dev",
+		Profiles: map[string]cliProfile{"dev": {
+			BaseURL: "https://example.com", Token: "profile_jwt", RefreshToken: "profile_refresh",
+		}},
+	}
+
+	t.Setenv("MODELRELAY_TOKEN", "")
+	cfg, err := resolveRuntimeConfig(newCmd(), cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RefreshToken != "profile_refresh" {
+		t.Fatalf("expected profile refresh token, got %q", cfg.RefreshToken)
+	}
+
+	t.Setenv("MODELRELAY_TOKEN", "env_jwt")
+	cfg, err = resolveRuntimeConfig(newCmd(), cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Token != "env_jwt" || cfg.RefreshToken != "" {
+		t.Fatalf("env token must not pair with the profile refresh token: %+v", cfg)
+	}
+}

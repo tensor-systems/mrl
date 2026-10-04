@@ -24,12 +24,16 @@ type runtimeConfig struct {
 	ProjectID string
 	APIKey    string
 	Token     string
-	Model     string
-	Output    outputFormat
-	Timeout   time.Duration
-	AllowAll  bool
-	Allow     []string
-	Trace     bool
+	// RefreshToken is the profile's account refresh token. It is only set when
+	// Token itself came from the profile, so a --token/MODELRELAY_TOKEN override
+	// is never silently replaced by a refreshed profile session.
+	RefreshToken string
+	Model        string
+	Output       outputFormat
+	Timeout      time.Duration
+	AllowAll     bool
+	Allow        []string
+	Trace        bool
 }
 
 type runtimeConfigKey struct{}
@@ -71,6 +75,10 @@ func resolveRuntimeConfig(cmd *cobra.Command, cfgFile cliConfig) (runtimeConfig,
 	apiKey := firstNonEmpty(apiKeyFlag, os.Getenv("MODELRELAY_API_KEY"), os.Getenv("MODELRELAY_SECRET_KEY"), profile.APIKey)
 	token := firstNonEmpty(tokenFlag, os.Getenv("MODELRELAY_TOKEN"), profile.Token)
 	model := firstNonEmpty(os.Getenv("MODELRELAY_MODEL"), profile.Model)
+	refreshToken := ""
+	if strings.TrimSpace(firstNonEmpty(tokenFlag, os.Getenv("MODELRELAY_TOKEN"))) == "" {
+		refreshToken = profile.RefreshToken
+	}
 
 	output, err := resolveOutputFormat(jsonFlag, profile.Output)
 	if err != nil {
@@ -83,17 +91,18 @@ func resolveRuntimeConfig(cmd *cobra.Command, cfgFile cliConfig) (runtimeConfig,
 	}
 
 	return runtimeConfig{
-		Profile:   profileName,
-		BaseURL:   strings.TrimSpace(baseURL),
-		ProjectID: strings.TrimSpace(projectID),
-		APIKey:    strings.TrimSpace(apiKey),
-		Token:     strings.TrimSpace(token),
-		Model:     strings.TrimSpace(model),
-		Output:    output,
-		Timeout:   timeout,
-		AllowAll:  profile.AllowAll,
-		Allow:     profile.Allow,
-		Trace:     profile.Trace,
+		Profile:      profileName,
+		BaseURL:      strings.TrimSpace(baseURL),
+		ProjectID:    strings.TrimSpace(projectID),
+		APIKey:       strings.TrimSpace(apiKey),
+		Token:        strings.TrimSpace(token),
+		RefreshToken: strings.TrimSpace(refreshToken),
+		Model:        strings.TrimSpace(model),
+		Output:       output,
+		Timeout:      timeout,
+		AllowAll:     profile.AllowAll,
+		Allow:        profile.Allow,
+		Trace:        profile.Trace,
 	}, nil
 }
 

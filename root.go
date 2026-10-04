@@ -73,6 +73,7 @@ Examples:
 	root.AddCommand(
 		newConfigCmd(),
 		newAuthCmd(),
+		newKeysCmd(),
 		newCustomerCmd(),
 		newUsageCmd(),
 		newTierCmd(),

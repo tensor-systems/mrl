@@ -111,3 +111,29 @@ func profileFor(cfg cliConfig, name string) cliProfile {
 	}
 	return cfg.Profiles[name]
 }
+
+// updateProfile loads the config file, applies mutate to the named profile, and
+// writes it back, leaving every other profile field and profile untouched. It
+// also makes the profile current when no current profile is set yet.
+func updateProfile(profileName string, mutate func(*cliProfile)) error {
+	cfg, err := loadCLIConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.Profiles == nil {
+		cfg.Profiles = map[string]cliProfile{}
+	}
+	profileCfg := profileFor(cfg, profileName)
+	mutate(&profileCfg)
+	cfg.Profiles[profileName] = profileCfg
+	if cfg.CurrentProfile == "" {
+		cfg.CurrentProfile = profileName
+	}
+	return writeCLIConfig(cfg)
+}
+
+// setAPIKey sets the profile's data-plane API key. 'mrl config set --api-key'
+// and 'mrl keys create' both store keys through it.
+func (p *cliProfile) setAPIKey(apiKey string) {
+	p.APIKey = strings.TrimSpace(apiKey)
+}
