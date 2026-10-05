@@ -70,6 +70,10 @@ Examples:
 		return nil
 	}
 
+	// `mrl --version` as well as `mrl version`: agents and scripts reach for the flag.
+	root.Version = version
+	root.SetVersionTemplate("mrl {{.Version}}\n")
+
 	root.AddCommand(
 		newConfigCmd(),
 		newAuthCmd(),
